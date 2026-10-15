@@ -41,9 +41,9 @@ in the instance's state directory; public interfaces expose bounded/redacted out
 native session. It preserves the stable id, Route, billing, permissions, model,
 working directory, grant and old generation evidence. Claude forks its native
 session; Codex resumes its recorded native session with generation-specific lineage.
-Host Codex workspace-write grants include the instance state directory in every
-generation through `sandbox_workspace_write.writable_roots`. Read-only runs and
-Boxes receive no additional host write root.
+Managed host workers use the [scoped delegation client](delegation.md) in every
+generation. Codex receives no instance-state writable root. Boxes receive no host
+delegation endpoint and cannot originate managed delegations.
 Obsolete supervisors cannot publish into the new generation. A managed child's
 continuation requires its original parent generation to remain active; otherwise it
 is refused before admission instead of waiting for a broker that has exited. Descendant agents may
@@ -71,9 +71,10 @@ and receipts remain. `run keep ID` protects a result. Expired output fails close
 retention never authorizes replay. State must remain user-owned (mode 0700), with
 regular private database/artifact files and no shared untrusted writers.
 
-Native workers in this alpha must be trusted with the instance state. In particular,
-Codex workspace-write includes that directory so nested CLI requests can reach the
-registry. The database contains other runs' grants and tokens; a worker able to
+Native workers in this alpha must still be trusted with the host. Normal managed
+CLI and Python clients use scoped requests without opening the instance registry.
+Same-UID filesystem/process access is not isolated. The database contains other
+runs' grants and tokens; a worker able to
 write it can bypass API grant validation or alter another run's evidence. Token
 removal from the supervisor environment does not isolate that database. Read-only
 native sandbox modes are not a separate-user confidentiality boundary either.

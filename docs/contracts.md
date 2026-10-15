@@ -94,3 +94,9 @@ retain the existing 16 MiB read limit.
 Only the current major contract version is supported. Compatible additions may
 add optional fields; consumers should ignore fields they do not recognize. A breaking
 meaning or field change requires a new contract version. Plugins declare version 1.
+
+
+Managed host clients use [scoped delegation](delegation.md) with the same CLI and
+Python method names, child visibility and durable mutation request ids. `events`
+is available through both interfaces. Route records declare `execution_boundary`
+separately from adapter capabilities: scoped transport does not certify isolation.

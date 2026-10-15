@@ -17,7 +17,7 @@ if 'auth' in args:
 if '--version' in args:
     print('synthetic-native 1');raise SystemExit(0)
 with open(os.environ['HF_TEST_WITNESS'],'a') as f:
-    f.write(json.dumps({'args':args,'run':os.environ['HARNESSFLEET_PARENT_RUN'],'service_token_present':'HARNESSFLEET_SERVICE_TOKEN' in os.environ})+'\n')
+    f.write(json.dumps({'args':args,'run':os.environ['HARNESSFLEET_PARENT_RUN'],'service_token_present':'HARNESSFLEET_SERVICE_TOKEN' in os.environ,'state_path_present':'HARNESSFLEET_STATE' in os.environ,'config_path_present':'HARNESSFLEET_CONFIG' in os.environ,'broker_present':bool(os.environ.get('HARNESSFLEET_BROKER'))})+'\n')
 task=args[-1]
 claude='--print' in args
 session=str(uuid.uuid4())
@@ -26,6 +26,15 @@ if 'resume' in args:
 def emit(data):
     print(json.dumps(data),flush=True)
 emit({'type':'system','subtype':'init','session_id':session} if claude else {'type':'thread.started','thread_id':session})
+if 'mode:capability' in task:
+    with open(os.environ['HF_TEST_CAPABILITY_WITNESS']+'.tmp','w') as f:
+        json.dump({key:os.environ[key] for key in ('HARNESSFLEET_BROKER','HARNESSFLEET_BROKER_OWNER','HARNESSFLEET_PARENT_TOKEN')},f)
+    os.replace(os.environ['HF_TEST_CAPABILITY_WITNESS']+'.tmp',os.environ['HF_TEST_CAPABILITY_WITNESS'])
+if 'mode:handoff' in task:
+    import socket,struct
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as broker, socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as handoff:
+        broker.connect(os.environ['HARNESSFLEET_BROKER']);handoff.connect(os.environ['HF_TEST_HANDOFF'])
+        handoff.sendmsg([b'x'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,struct.pack('i',broker.fileno()))])
 if 'mode:slow' in task:
     time.sleep(8)
 if 'mode:descendant' in task:
@@ -57,6 +66,44 @@ if 'mode:recursive' in task:
 elif 'mode:forbidden-child' in task:
     p=subprocess.run([sys.executable,'-m','harnessfleet','run','start','--route','claude-local','--model','model-b','--permission','delegate','mode:leaf'],capture_output=True,text=True)
     output='Child refusal: '+json.loads(p.stderr)['error']['code']
+elif 'mode:foreign-control' in task:
+    outcomes={}
+    for action in ('status','stop'):
+        p=subprocess.run([sys.executable,'-m','harnessfleet','run',action,os.environ['HF_TEST_VICTIM']],capture_output=True,text=True)
+        outcomes[action]=json.loads(p.stderr)['error']['code'] if p.returncode else 'UNAUTHORIZED_SUCCESS'
+    output=json.dumps(outcomes)
+elif 'mode:cleared-parent' in task:
+    env=dict(os.environ)
+    for key in ('HARNESSFLEET_PARENT_RUN','HARNESSFLEET_PARENT_GENERATION'):
+        env.pop(key,None)
+    p=subprocess.run([sys.executable,'-m','harnessfleet','run','start','--route','claude-local','--permission','delegate','leaf'],env=env,capture_output=True,text=True)
+    output=json.loads(p.stderr)['error']['code'] if p.returncode else 'UNAUTHORIZED_ROOT'
+elif 'mode:idempotent' in task:
+    from harnessfleet import RunManager
+    from harnessfleet.storage import Store
+    def forbidden(*args,**kwargs):raise AssertionError('Worker attempted local Store access')
+    Store.__init__=forbidden
+    m=RunManager();request_id='a'*32
+    if 'mode:lost-reply' in task:
+        import socket
+        packet={'schema_version':1,'operation':'start','args':['claude-local','mode:leaf'],'kwargs':{'model':'model-b'},'request_id':request_id,'token':os.environ['HARNESSFLEET_PARENT_TOKEN']}
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
+            connection.connect(os.environ['HARNESSFLEET_BROKER']);connection.sendall((json.dumps(packet)+'\n').encode())
+            with connection.makefile('rb') as stream:assert stream.readline(100000).endswith(b'\n')
+    first=m.start('claude-local','mode:leaf',model='model-b',request_id=request_id)
+    second=m.start('claude-local','mode:leaf',model='model-b',request_id=request_id)
+    try:
+        m.start('claude-local','different assignment',model='model-b',request_id=request_id)
+        conflict='UNAUTHORIZED_REBIND'
+    except Exception as error:
+        conflict=getattr(error,'code',None)
+    m.wait(first['id'],10)
+    result=m.output(first['id'])
+    output=json.dumps({'ids':[first['id'],second['id']],'verified':result['verified'],'children':m.list()['total'],'conflict':conflict})
+elif 'mode:missing-broker' in task:
+    env=dict(os.environ);env['HARNESSFLEET_BROKER']='/nonexistent/harnessfleet.sock'
+    p=subprocess.run([sys.executable,'-m','harnessfleet','run','start','--route','claude-local','leaf'],env=env,capture_output=True,text=True)
+    output=json.loads(p.stderr)['error']['code'] if p.returncode else 'UNAUTHORIZED_FALLBACK'
 else:
     output='synthetic final' if 'mode:neutral-quota' not in task else 'No quota exhaustion occurred.'
 if 'mode:no-final' in task:
@@ -112,6 +159,8 @@ def instance(tmp_path, monkeypatch):
         "HARNESSFLEET_PARENT_RUN",
         "HARNESSFLEET_PARENT_TOKEN",
         "HARNESSFLEET_PARENT_GENERATION",
+        "HARNESSFLEET_BROKER",
+        "HARNESSFLEET_BROKER_OWNER",
         "HARNESSFLEET_BOX",
         "CODEX_BOX_ACCOUNT",
         "CURSOR_BOX_ACCOUNT",

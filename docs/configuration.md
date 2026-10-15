@@ -194,3 +194,8 @@ a Box-origin marker, their derived identity and dedicated native home, without
 host delegation tokens or the full host environment. Box workers cannot launch
 managed delegations. Do not use this experimental backend to certify an image or
 billing/account combination without native qualification.
+
+
+`policy.worker_isolation` defaults to `trusted`, including older configurations
+that omit it. A Route may also declare a requirement. Any non-trusted requirement
+is currently refused before admission; scoped delegation does not qualify OS isolation.

@@ -55,6 +55,11 @@ An observed native session is read-only and is not an execution grant.
 Codex `read-only` uses its native sandbox. Claude `read-only` exposes Read/Glob/Grep;
 `workspace-write` adds file editing. Claude `delegate` additionally enables Bash,
 which can modify files and run commands without OS containment: request it only
-when the user's grant authorizes it. Codex `workspace-write` allows the configured
-state directory so delegated CLI calls can register their results. Native tool
-restrictions are not general process or network containment.
+when the user's grant authorizes it. Managed host CLI/Python calls use the supplied
+scoped delegation endpoint; do not select another config/state or access the registry
+directly. Only this active parent generation's children are available. Global service,
+retention, dispatch and recovery belong to host administration. A transport error
+includes its request id: reuse only that id with `--request-id ID`; never resubmit an
+uncertain mutation under a new id. Endpoint failure never permits direct-storage
+fallback. Scoped delegation and native tool restrictions do not establish cross-worker,
+process or network containment.

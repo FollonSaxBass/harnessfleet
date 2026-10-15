@@ -37,6 +37,7 @@ def defaults():
             "max_invocations": 20,
             "cwd_roots": [],
             "experimental": False,
+            "worker_isolation": "trusted",
         },
         "sources": [],
         "projects": [],

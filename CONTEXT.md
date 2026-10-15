@@ -36,3 +36,10 @@ _Avoid_: Assuming an observed session is available for execution.
 
 **Receipt**: Evidence bound to one invocation generation and its verified outcome.
 _Avoid_: Treating a missing receipt as permission to repeat a consumed request.
+
+
+**Delegation capability**: Authority to request child operations under one active parent generation.
+_Avoid_: Host administration or proof of worker isolation.
+
+**Worker isolation**: Enforced separation preventing a native worker from accessing another run's private state and control processes.
+_Avoid_: A scoped delegation capability as a synonym.

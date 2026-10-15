@@ -63,11 +63,27 @@ def inside(path, roots):
 class RunManager:
     contract_version = 1
 
+    def __new__(cls, config_path=None, state_path=None):
+        from .delegation import Client, managed_environment
+
+        if (
+            os.environ.get("HARNESSFLEET_BOX")
+            or os.environ.get("CODEX_BOX_ACCOUNT")
+            or os.environ.get("CURSOR_BOX_ACCOUNT")
+        ):
+            raise FleetError("box_origin", "Boxes cannot originate managed delegation in v0.1")
+        if managed_environment():
+            if config_path is not None or state_path is not None:
+                raise FleetError("delegation_scope", "Worker clients cannot select instance storage")
+            return Client()
+        return super().__new__(cls)
+
     def __init__(self, config_path=None, state_path=None):
         cp, sp = config.locations()
         self.config_path = Path(config_path or cp).absolute()
         self.store = Store(state_path or sp)
         self.adapters = adapters.registry()
+        self._principal = None
 
     def configuration(self):
         return config.load(self.config_path)
@@ -91,6 +107,15 @@ class RunManager:
                 )
             }
             row["permitted"] = route["id"] in data["policy"]["routes"]
+            row["execution_boundary"] = {
+                "delegation_transport": "unix-v1"
+                if route.get("environment", "host") == "host" and a and a.capabilities.launch
+                else "unsupported",
+                "worker_isolation": "unsupported",
+                "requested_isolation": route.get(
+                    "worker_isolation", data["policy"].get("worker_isolation", "trusted")
+                ),
+            }
             row["support"] = (
                 adapters.describe(a) if a else {"capabilities": {}, "error": "adapter unavailable"}
             )
@@ -112,6 +137,14 @@ class RunManager:
 
     def _validate(self, run, cfg, *, dispatch=False):
         route = self._route(run["route_id"], cfg)
+        if any(
+            boundary.get("worker_isolation", "trusted") != "trusted"
+            for boundary in (route, cfg["policy"], run["grant"])
+        ):
+            raise FleetError(
+                "isolation",
+                "No worker-isolation backend is qualified; trusted execution cannot satisfy an isolation requirement",
+            )
         if dispatch and route != run["route"]:
             raise FleetError(
                 "route_changed", "Route changed after admission; submit a new authorized request"
@@ -169,17 +202,31 @@ class RunManager:
             or os.environ.get("CURSOR_BOX_ACCOUNT")
         ):
             raise FleetError("box_origin", "Boxes cannot originate managed delegation in v0.1")
-        rid = os.environ.get("HARNESSFLEET_PARENT_RUN")
+        authority = self._principal or {
+            "id": os.environ.get("HARNESSFLEET_PARENT_RUN"),
+            "generation": os.environ.get("HARNESSFLEET_PARENT_GENERATION"),
+            "token": os.environ.get("HARNESSFLEET_PARENT_TOKEN", ""),
+        }
+        rid = authority["id"]
         if not rid:
             return None
         parent = self.store.get(rid, c)
         if parent["status"] != "running" or not hmac.compare_digest(
-            parent["child_token"], os.environ.get("HARNESSFLEET_PARENT_TOKEN", "")
+            parent["child_token"], authority["token"]
         ):
             raise FleetError("parent", "Parent generation is inactive or authority is invalid")
-        if str(parent["generation"]) != os.environ.get("HARNESSFLEET_PARENT_GENERATION"):
+        if str(parent["generation"]) != str(authority["generation"]):
             raise FleetError("parent", "Parent generation is obsolete")
         return parent
+
+    def _resource(self, run, c):
+        if self._principal:
+            parent = self._parent(c)
+            if (run.get("parent_run"), run.get("parent_generation")) != (parent["id"], parent["generation"]):
+                raise FleetError("delegation_scope", "Run is outside this parent generation")
+
+    def events(self, rid, after=0):
+        return {"schema_version": 1, "events": self.store.events(rid, after)}
 
     def _capacity(self, run, rows, cfg):
         active = [
@@ -363,7 +410,15 @@ class RunManager:
                 self.store.save(c, current, "host_spawn_claimed")
                 run = current
         env = dict(os.environ)
-        env.pop("HARNESSFLEET_SERVICE_TOKEN", None)
+        for key in (
+            "HARNESSFLEET_SERVICE_TOKEN",
+            "HARNESSFLEET_BROKER",
+            "HARNESSFLEET_BROKER_OWNER",
+            "HARNESSFLEET_PARENT_RUN",
+            "HARNESSFLEET_PARENT_GENERATION",
+            "HARNESSFLEET_PARENT_TOKEN",
+        ):
+            env.pop(key, None)
         env["HARNESSFLEET_CONFIG"] = str(self.config_path)
         env["HARNESSFLEET_STATE"] = str(self.store.root)
         env["HARNESSFLEET_EXECUTION"] = f"{run['id']}:{run['generation']}:{run['execution_token']}"
@@ -462,6 +517,7 @@ class RunManager:
     def cancel(self, rid):
         with self.store.transaction() as c:
             run = self.store.get(rid, c)
+            self._resource(run, c)
             if run["status"] != "queued":
                 raise FleetError("cancel", "Request was dispatched; use stop")
             run.update(status="cancelled", updated_at=time.time(), cleanup_confirmed=True)
@@ -491,6 +547,7 @@ class RunManager:
         # start() and stop() serialize through this transaction.
         with self.store.transaction() as c:
             run = self.store.get(rid, c)
+            self._resource(run, c)
             if run["status"] == "queued":
                 run.update(status="cancelled", updated_at=time.time())
                 self.store.save(c, run, "cancelled")

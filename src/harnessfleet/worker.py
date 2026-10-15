@@ -116,6 +116,7 @@ def supervise(rid, generation):
     raw = []
     failure = None
     native_env = {}
+    portal = None
     stderr_chunks = []
     try:
         directory = s.directory(rid, generation)
@@ -136,10 +137,16 @@ def supervise(rid, generation):
                 HARNESSFLEET_PARENT_GENERATION=str(generation),
                 HARNESSFLEET_PARENT_TOKEN=run["child_token"],
                 HARNESSFLEET_EXECUTION=marker,
-                HARNESSFLEET_STATE=str(s.root),
-                HARNESSFLEET_CONFIG=str(m.config_path),
                 AGENT_IDENTITY=run["identity"],
             )
+            for key in (
+                "HARNESSFLEET_CONFIG",
+                "HARNESSFLEET_STATE",
+                "HARNESSFLEET_SERVICE_TOKEN",
+                "HARNESSFLEET_BROKER",
+                "HARNESSFLEET_BROKER_OWNER",
+            ):
+                native_env.pop(key, None)
             # The skill is a bounded explicit reference, not a parent conversation export.
             from importlib.resources import files
 
@@ -161,15 +168,15 @@ def supervise(rid, generation):
                 command = adapter.command(command_run, str(directory))
             else:
                 command = adapter.command(run, str(directory))
-            if run["harness"] == "codex_cli" and run["permission"] == "workspace-write" and not is_box:
-                command[-2:-2] = [
-                    "-c",
-                    "sandbox_workspace_write.writable_roots=" + json.dumps([str(s.root)]),
-                ]
             # Receipt is consumed before Popen; a crash here is ambiguous, never replayable.
             run.update(invoked=True, status="running", updated_at=time.time())
             s.save(c, run, "invocation_consumed")
         # Commit the consumed marker before any native/container effect.
+        if not is_box:
+            from .delegation import Portal
+
+            portal = Portal(m, rid, generation)
+            native_env.update(portal.environment())
         if is_box:
             from .boxes import prepare
 
@@ -203,6 +210,8 @@ def supervise(rid, generation):
                 close_fds=True,
             )
             current["native_process"] = processes.receipt(process.pid)
+            if portal is not None:
+                portal.bind_native(current["native_process"])
             s.save(c, current, "native_created")
         broker = threading.Thread(target=serve_children, args=(m, rid, generation, stopped), daemon=True)
         broker.start()
@@ -244,6 +253,8 @@ def supervise(rid, generation):
         failure = e.code if isinstance(e, FleetError) else "execution"
     finally:
         stopped.set()
+        if portal is not None:
+            portal.close()
         # Child exit does not prove descendant cleanup. Keep capacity on uncertainty.
         current = s.get(rid)
         if current["generation"] != generation:
