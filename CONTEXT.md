@@ -16,6 +16,9 @@ _Avoid_: Native session as a synonym.
 **Generation**: One bounded invocation or continuation belonging to an Agent Run.
 _Avoid_: A new Agent Run for every follow-up.
 
+**Leaf run**: A managed Agent Run without authority to originate further managed delegation.
+_Avoid_: Treating observation or inherited project access as delegation permission.
+
 **Grant**: Preauthorized delegation authority and its finite limits, inherited or narrowed by descendants.
 _Avoid_: Visibility as authorization.
 
