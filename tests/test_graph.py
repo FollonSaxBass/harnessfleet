@@ -1,5 +1,26 @@
 import json
+import pytest
 from harnessfleet.graph import Graph, native_key, run_key
+
+
+def test_invalid_source_entries_do_not_hide_valid_sources(instance):
+    connect(instance, [{"id": "visible", "label": "Visible session"}])
+    instance.config["sources"].extend(["invalid", None, 42])
+    instance.save()
+    page = Graph(instance.m).page()
+    assert page["total"] == 1 and page["nodes"][0]["label"] == "Visible session"
+    assert [issue["code"] for issue in page["issues"]] == ["source_configuration"] * 3
+    assert json.loads(instance.cli("graph").stdout)["total"] == 1
+    assert not instance.calls()
+
+
+@pytest.mark.parametrize("sources", [None, "invalid", {}])
+def test_invalid_source_list_is_an_explicit_graph_issue(instance, sources):
+    instance.config["sources"] = sources
+    instance.save()
+    result = json.loads(instance.cli("graph").stdout)
+    assert result["total"] == 0
+    assert result["issues"] == [{"code": "source_configuration", "source": None}]
 
 
 def connect(instance, nodes, **options):

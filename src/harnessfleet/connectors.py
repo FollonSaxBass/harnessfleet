@@ -29,13 +29,22 @@ def inspect(manager, kind):
     source = cfg.get("connectors", {}).get(kind)
     if not source or not source.get("enabled"):
         return {"schema_version": 1, "kind": kind, "availability": "disabled", "items": []}
-    from .graph import load_source
+    from .graph import load_source, valid_native_row
+    from .worker import redact
 
     info, payload = load_source({"id": kind, "harness": "connector", "path": source["path"]})
+    items, issues = [], []
+    limits = {"id": 512, "parent": 512, "label": 200, "kind": 80, "status": 80, "completeness": 80}
+    for index, row in enumerate(payload.get("nodes", [])):
+        if not valid_native_row(row):
+            issues.append({"code": "connector_record", "index": index})
+            continue
+        items.append({key: redact(row[key])[:limit] for key, limit in limits.items() if key in row})
     return {
         "schema_version": 1,
         "kind": kind,
         "availability": info["availability"],
-        "completeness": info["completeness"],
-        "items": payload.get("nodes", []),
+        "completeness": "partial" if issues else info["completeness"],
+        "items": items,
+        "issues": issues,
     }

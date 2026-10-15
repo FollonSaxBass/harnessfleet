@@ -8,6 +8,10 @@ TERMINAL = {"finished", "failed", "stopped", "quota", "authentication", "cancell
 ACTIVE = {"starting", "running", "stopping", "uncertain"}
 
 
+def error_record(code: str, message: str):
+    return {"schema_version": CONTRACT_VERSION, "error": {"code": code, "message": message}}
+
+
 class FleetError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)

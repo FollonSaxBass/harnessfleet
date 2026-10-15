@@ -26,6 +26,10 @@ def run_key(rid, generation):
 
 
 def load_source(source):
+    if source.get("format") == "cursor-transcripts-v1":
+        from .cursor_source import load
+
+        return load(source)
     info = {
         "id": source["id"],
         "harness": source["harness"],
@@ -130,7 +134,14 @@ class Graph:
                 if g.get("parent_run"):
                     edge(run_key(g["parent_run"], g["parent_generation"]), key, "authority")
         seen_sources = set()
-        for source in cfg.get("sources", []):
+        configured_sources = cfg.get("sources", [])
+        if not isinstance(configured_sources, list):
+            issues.append({"code": "source_configuration", "source": None})
+            configured_sources = []
+        for source in configured_sources:
+            if not isinstance(source, dict):
+                issues.append({"code": "source_configuration", "source": None})
+                continue
             if not source.get("enabled", False):
                 continue
             required = ("id", "harness", "environment", "account", "path")
@@ -138,7 +149,7 @@ class Graph:
                 issues.append({"code": "source_configuration", "source": source.get("id")})
                 continue
             seen_sources.add(source["id"])
-            if source.get("format", "normalized-v1") != "normalized-v1":
+            if source.get("format", "normalized-v1") not in ("normalized-v1", "cursor-transcripts-v1"):
                 sources.append(
                     {
                         "id": source["id"],
@@ -149,6 +160,7 @@ class Graph:
                 )
                 continue
             info, payload = load_source(source)
+            issues.extend({**issue, "source": source["id"]} for issue in info.pop("issues", []))
             cache_key = "source:" + native_key(source, "metadata")
             with m.store.transaction() as c:
                 cached = c.execute("SELECT data FROM meta WHERE key=?", (cache_key,)).fetchone()

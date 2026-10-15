@@ -27,9 +27,14 @@ Other methods: `routes(diagnose=False)`, `list(offset=0,limit=50)`, `status(id)`
 `start` options include billing, permission, model, cwd, queue, structured selection
 and finite `auto_resume`. An exact target is `{ "route":"R", "model":"M" }`.
 Required sets use `selection.required`; allowed sets use `selection.allowed`.
+An absent or `null` constraint is unspecified; a non-null constraint must be a list
+of resolved targets. Inherited authority still applies when a constraint is unspecified.
 `start_many` returns every target with either `run` or an explicit `error` and an
 `all_started` flag. Native unavailability may be discovered by the asynchronous
 worker after admission; followers/output remain the final authority.
+Malformed target members receive `selection` errors without hiding valid members'
+admitted run ids. Malformed explicit selection constraints reject the entire request
+before admission. A failed batch is not permission to repeat its successful members.
 
 Public Agent Run fields include stable `id`, current `generation`, lifecycle `status`,
 Route/harness/environment/account/billing/model/permission, cwd, derived identity,
@@ -73,6 +78,18 @@ history is never moved to a later reused session.
 native reply. Public graph pages do not embed replies. Native observation cannot
 launch or attach execution. HTTP control requires loopback Host, same Origin and a
 session CSRF header. The local API has no CORS and is not a multi-user security boundary.
+
+`cursor-transcripts-v1` is an opt-in observation source for an explicitly configured
+project directory. It produces partial native session/subagent nodes and latest
+observed replies; it does not bind managed generations or grant control. Missing
+or unreadable transcripts and read-budget limits produce explicit issues while
+preserving navigable nodes. See [configuration](configuration.md#cursor-transcript-observation).
+
+`connectors KIND` returns metadata items with redacted string fields: `id` and
+`parent` up to 512 characters, `label` up to 200, and `kind`, `status` and
+`completeness` up to 80. Replies and undeclared fields are excluded. Invalid items
+are omitted with `connector_record` issues and partial completeness. Source files
+retain the existing 16 MiB read limit.
 
 Only the current major contract version is supported. Compatible additions may
 add optional fields; consumers should ignore fields they do not recognize. A breaking

@@ -25,9 +25,15 @@ Codex uses its native sandbox. Claude read-only exposes only Read/Glob/Grep; wor
 write adds file-editing tools. Claude delegate also enables Bash, which is not OS
 containment. Cursor and DSH do not promise read-only enforcement and reject that
 request. Their protocol/configuration remains experimental and needs native evidence.
+Native workers must be trusted with their instance's shared registry. Workspace-write
+state access can expose other run tokens and permit state tampering; see the
+[state trust boundary](recovery.md) and [remaining work](remaining-work.md).
 
-Native lineage currently accepts explicit normalized-v1 exports. Automatic native
-SQLite/JSONL store discovery and tracing are not qualified. Observation, managed
+Native lineage accepts explicit normalized-v1 exports and an experimental
+`cursor-transcripts-v1` source for one configured project's transcript directory,
+including IDE conversations without a chat store and their immediate native children.
+Cursor observation has synthetic fixture/browser evidence; complete native tracing
+and automatic SQLite/JSONL store discovery are not qualified. Observation, managed
 execution and exact causal lineage are separate. Compact observed ancestry survives
 source loss, with expired completeness. App control requires a future lease backend.
 
@@ -54,6 +60,13 @@ plugins can prove account-specific recovery through the versioned contract.
   replayed. The initial uncertain child was explicitly stopped and reconciled.
 - Deterministic policy, lifecycle, process, graph, browser, Box and plugin tests pass.
   Synthetic Docker evidence does not certify a native image/account combination.
+- After the whole-product corrections, a separate native Codex CLI 0.162.1
+  workspace-write run and its explicit continuation passed using gpt-6.1-sol on
+  Subscription. Both generations wrote distinct synthetic files in the instance
+  state directory outside the project cwd; the continuation read the first file.
+  Stable run identity, the resumed native session, both verified outputs and
+  controller/worker cleanup were checked. This bounded temporary-directory write
+  check does not prove denial outside allowed roots or isolation from other runs.
 
 Private run ids, native session ids, account identifiers, transcripts and credential
 material are excluded from public evidence. Native runs remain in private temporary

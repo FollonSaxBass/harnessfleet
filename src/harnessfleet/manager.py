@@ -298,10 +298,25 @@ class RunManager:
     def start_many(self, targets, assignment, *, selection=None, **options):
         if not isinstance(targets, list) or not targets:
             raise FleetError("selection", "Provide resolved targets")
+
+        def valid(target):
+            return isinstance(target, dict) and all(
+                isinstance(target.get(key), str) and target[key].strip() for key in ("route", "model")
+            )
+
+        if selection is not None and (
+            not isinstance(selection, dict)
+            or any(
+                selection.get(key) is not None
+                and (not isinstance(selection[key], list) or not all(valid(t) for t in selection[key]))
+                for key in ("allowed", "required")
+            )
+        ):
+            raise FleetError("selection", "Selection constraints must contain resolved targets")
         selection = selection or {"required": targets}
         if len({json.dumps(t, sort_keys=True) for t in targets}) != len(targets):
             raise FleetError("selection", "Duplicate targets are not allowed")
-        required = selection.get("required", [])
+        required = selection.get("required") or []
         missing = [t for t in required if t not in targets]
         if missing:
             raise FleetError("selection", "Every required target must be accounted for")
@@ -309,7 +324,11 @@ class RunManager:
         result = []
         for t in targets:
             try:
-                narrowed = {"allowed": selection.get("allowed") or required or targets}
+                if not valid(t):
+                    raise FleetError("selection", "Target must specify nonempty route and model strings")
+                narrowed = {
+                    "allowed": [t for t in (selection.get("allowed") or required or targets) if valid(t)]
+                }
                 result.append(
                     {
                         "target": t,
@@ -344,6 +363,7 @@ class RunManager:
                 self.store.save(c, current, "host_spawn_claimed")
                 run = current
         env = dict(os.environ)
+        env.pop("HARNESSFLEET_SERVICE_TOKEN", None)
         env["HARNESSFLEET_CONFIG"] = str(self.config_path)
         env["HARNESSFLEET_STATE"] = str(self.store.root)
         env["HARNESSFLEET_EXECUTION"] = f"{run['id']}:{run['generation']}:{run['execution_token']}"
@@ -514,6 +534,17 @@ class RunManager:
             # A just-admitted controller may not yet have registered its supervisor.
             if not run.get("supervisor") and time.time() - run["updated_at"] < 5:
                 continue
+            if (
+                run["status"] == "starting"
+                and not run.get("parent_run")
+                and not run.get("supervisor")
+                and not run.get("spawn_claim")
+                and not run.get("invoked")
+            ):
+                from .service import status as controller_status
+
+                if controller_status(self)["running"]:
+                    continue
             if not run.get("supervisor") and run.get("parent_run") and not run.get("spawn_claim"):
                 parent = self.store.get(run["parent_run"])
                 if parent["generation"] == run["parent_generation"] and processes.alive(

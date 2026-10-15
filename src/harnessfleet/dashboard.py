@@ -5,7 +5,7 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from urllib.parse import parse_qs, urlsplit
-from .contracts import FleetError
+from .contracts import FleetError, error_record
 from .graph import Graph
 from .worker import redact
 
@@ -40,7 +40,7 @@ def server(manager, port=8421):
 
         def do_GET(self):
             if not self.valid_host():
-                self.send(403, {"error": "host"})
+                self.send(403, error_record("host", "Loopback Host required"))
                 return
             url = urlsplit(self.path)
             q = parse_qs(url.query)
@@ -80,16 +80,14 @@ def server(manager, port=8421):
                     }[url.path]
                     self.send(200, files("harnessfleet").joinpath("assets", name).read_text(), mime)
                 else:
-                    self.send(404, {"error": "not_found"})
+                    self.send(404, error_record("not_found", "Unknown endpoint"))
             except (FleetError, ValueError) as e:
                 self.send(
                     400,
-                    {
-                        "error": {
-                            "code": e.code if isinstance(e, FleetError) else "request",
-                            "message": str(e) if isinstance(e, FleetError) else "Invalid request",
-                        }
-                    },
+                    error_record(
+                        e.code if isinstance(e, FleetError) else "request",
+                        str(e) if isinstance(e, FleetError) else "Invalid request",
+                    ),
                 )
 
         def do_POST(self):
@@ -103,28 +101,28 @@ def server(manager, port=8421):
                 or not valid_origin
                 or not secrets.compare_digest(self.headers.get("X-HarnessFleet-Token", ""), token)
             ):
-                self.send(403, {"error": "origin"})
+                self.send(403, error_record("origin", "Same Origin and valid session token required"))
                 return
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 if not 0 < length <= 4096:
                     raise ValueError()
                 data = json.loads(self.rfile.read(length))
+                if not isinstance(data, dict):
+                    raise ValueError()
                 if self.path == "/api/stop":
                     self.send(200, manager.stop(data["id"]))
                 elif self.path == "/api/cancel":
                     self.send(200, manager.cancel(data["id"]))
                 else:
-                    self.send(404, {"error": "not_found"})
-            except (FleetError, ValueError, KeyError) as e:
+                    self.send(404, error_record("not_found", "Unknown endpoint"))
+            except (FleetError, ValueError, KeyError, TypeError) as e:
                 self.send(
                     400,
-                    {
-                        "error": {
-                            "code": getattr(e, "code", "request"),
-                            "message": str(e) if isinstance(e, FleetError) else "Invalid request",
-                        }
-                    },
+                    error_record(
+                        e.code if isinstance(e, FleetError) else "request",
+                        str(e) if isinstance(e, FleetError) else "Invalid request",
+                    ),
                 )
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)

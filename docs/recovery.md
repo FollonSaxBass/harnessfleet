@@ -13,6 +13,9 @@ The host supervisor brokers managed child launches. A native tool subprocess onl
 registers a durable request; it does not own the child's supervisor lifetime. The
 broker claims the launch before creating its supervisor. Losing a creation
 acknowledgement leaves uncertainty and never creates a second invocation.
+Recovery leaves an unclaimed, uninvoked root admission pending while the registered
+controller is alive. Once a spawn has been claimed, missing creation evidence stays
+uncertain even if another controller is available.
 
 Supervisors and native processes carry a per-generation execution marker, Linux
 boot/start identity and pinned pidfds for signaling. An unrelated PID or a reused
@@ -38,6 +41,9 @@ in the instance's state directory; public interfaces expose bounded/redacted out
 native session. It preserves the stable id, Route, billing, permissions, model,
 working directory, grant and old generation evidence. Claude forks its native
 session; Codex resumes its recorded native session with generation-specific lineage.
+Host Codex workspace-write grants include the instance state directory in every
+generation through `sandbox_workspace_write.writable_roots`. Read-only runs and
+Boxes receive no additional host write root.
 Obsolete supervisors cannot publish into the new generation. A managed child's
 continuation requires its original parent generation to remain active; otherwise it
 is refused before admission instead of waiting for a broker that has exited. Descendant agents may
@@ -56,9 +62,21 @@ its process ownership receipt. It installs no system startup hooks. Supervisors 
 independent of both controller and dashboard. Keep the controller running for queue
 dispatch, or call `run dispatch` explicitly. A queued child whose parent generation
 is no longer active is rejected before native effects.
+`service run` is the registered controller's internal entrypoint and requires both
+its token and process receipt. The token is removed before supervisors are spawned.
 
 `run prune` applies event/transcript retention after three days and output retention
 after fourteen days. Active, kept and uncertain runs are preserved. Compact metadata
 and receipts remain. `run keep ID` protects a result. Expired output fails closed;
 retention never authorizes replay. State must remain user-owned (mode 0700), with
 regular private database/artifact files and no shared untrusted writers.
+
+Native workers in this alpha must be trusted with the instance state. In particular,
+Codex workspace-write includes that directory so nested CLI requests can reach the
+registry. The database contains other runs' grants and tokens; a worker able to
+write it can bypass API grant validation or alter another run's evidence. Token
+removal from the supervisor environment does not isolate that database. Read-only
+native sandbox modes are not a separate-user confidentiality boundary either.
+Do not run mutually untrusted work in one instance. A controller-owned registry
+with a restricted delegation client and scoped artifact access is required before
+claiming worker isolation or tamper-resistant inherited authority.

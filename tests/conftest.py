@@ -17,7 +17,7 @@ if 'auth' in args:
 if '--version' in args:
     print('synthetic-native 1');raise SystemExit(0)
 with open(os.environ['HF_TEST_WITNESS'],'a') as f:
-    f.write(json.dumps({'args':args,'run':os.environ['HARNESSFLEET_PARENT_RUN']})+'\n')
+    f.write(json.dumps({'args':args,'run':os.environ['HARNESSFLEET_PARENT_RUN'],'service_token_present':'HARNESSFLEET_SERVICE_TOKEN' in os.environ})+'\n')
 task=args[-1]
 claude='--print' in args
 session=str(uuid.uuid4())

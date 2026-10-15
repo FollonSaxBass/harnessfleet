@@ -99,6 +99,50 @@ Source exports are trusted observation inputs, not control grants. Native store
 parsers are not yet qualified. Missing sources preserve cached compact lineage,
 marking it expired and withholding old replies. Disabling a source stops observation.
 
+### Cursor transcript observation
+
+The experimental `cursor-transcripts-v1` source reads one explicitly selected
+project's `agent-transcripts` directory. This includes IDE conversations that have
+no chat store, and the same transcript layout written by Cursor Agent:
+
+```json
+{"id":"cursor-project","harness":"cursor_app","environment":"app","account":"personal",
+ "path":"/your/cursor-project/agent-transcripts","format":"cursor-transcripts-v1","enabled":true}
+```
+
+Choose the harness/environment/account namespace explicitly for the source you
+connect. `cursor_app` is an observation-only namespace and provides no launch or
+attachment adapter. For CLI transcripts use `cursor_agent` and the matching
+environment. Transcript contents alone do not establish which app or account ran
+them. No source is enabled during installation.
+
+The supported layout is `<session-uuid>/<session-uuid>.jsonl`, with native children
+at `<session-uuid>/subagents/<child-id>.jsonl`. Each session appears once from its
+transcript; a chat database is unnecessary. Labels use the first available user
+query, excluding Cursor's surrounding context tags. Output exposes the latest
+available assistant text, redacted and bounded, as an **unverified observed reply**.
+Tool payloads are excluded. Only an explicit successful `turn_ended` event marks
+the observed turn done; other activity remains unknown.
+
+Reads use directory ownership of the transcript files to associate native children.
+They do not infer managed parentage from cwd or process proximity. Associating an
+exact managed generation/caller still requires an attributable normalized export.
+There is no implicit scan of other projects, credential files or native homes.
+
+At most 256 KiB is read per transcript, using its beginning and end for larger
+files, and at most 16 MiB per source snapshot. Sessions are read by transcript
+modification time, newest first, with native identifiers breaking ties. Metadata
+ordering does not follow session or transcript links. Every discovered session and supported
+child remains in the graph when the read budget is exhausted; unread content stays
+unknown and produces an explicit issue. Malformed/missing files and rejected links
+are reported without hiding readable sessions. For windowed reads, the beginning
+supplies labels; only complete assistant records
+in the ending window supply observed output. If none is readable there, output is
+unavailable even when an older reply was readable at the beginning. Completeness stays partial
+because transcripts cannot prove complete native ancestry or lifecycle. Root,
+session, child-directory and transcript symlinks are refused. Native compatibility
+is covered by synthetic fixtures; broader native tracing qualification remains open.
+
 ## Optional integrations
 
 `projects` is an explicit list of `{ "name":"project", "path":"/your/project" }`.
@@ -106,8 +150,10 @@ Only these directories are queried by `harnessfleet connectors projects`; Git wr
 are disabled. Other connectors are initially empty and use explicit bounded JSON
 snapshot paths: `connectors.tasks={"enabled":true,"path":"..."}` and the same
 shape for handoffs, ownership, documentation and quotas. Their payload follows the
-normalized `schema_version/nodes/completeness` shape. No company-specific integration
-is included.
+normalized `schema_version/nodes/completeness` shape. Public items contain only
+bounded, redacted metadata: `id`, `parent`, `label`, `kind`, `status` and
+`completeness`. Replies and extra fields are excluded; malformed items produce
+issues and partial completeness. No company-specific integration is included.
 
 `notifications.webhook` enables a completion webhook with public run metadata only.
 `notifications.bearer_env` references its optional environment credential. Delivery
