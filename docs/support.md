@@ -25,8 +25,10 @@ Codex uses its native sandbox. Claude read-only exposes only Read/Glob/Grep; wor
 write adds file-editing tools. Claude delegate also enables Bash, which is not OS
 containment. Cursor and DSH do not promise read-only enforcement and reject that
 request. Their protocol/configuration remains experimental and needs native evidence.
-Native workers use a scoped Unix delegation interface without a registry write
-grant. Same-UID host access remains trusted and can expose other run tokens or
+Native starts default to leaf execution without delegation capability. Required
+delegation uses a separately enabled, unqualified experimental Unix interface
+without a registry write grant. Missing transport configuration means disabled.
+Same-UID host access remains trusted and can expose other run tokens or
 permit state tampering outside that interface; see the
 [state trust boundary](recovery.md) and [remaining work](remaining-work.md).
 

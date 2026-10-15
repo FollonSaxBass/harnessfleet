@@ -154,8 +154,8 @@ class Portal:
         self.manager, self.rid, self.generation = manager, rid, generation
         self.native_handle = None
         self.native_receipt = None
-        self.directory = tempfile.TemporaryDirectory(prefix="harnessfleet-client-")
-        self.path = str(Path(self.directory.name) / "broker.sock")
+        self.directory = None
+        self.server = None
         portal = self
         slots = threading.BoundedSemaphore(8)
 
@@ -198,14 +198,18 @@ class Portal:
                 finally:
                     slots.release()
 
-        self.server = Server(self.path, Handler, bind_and_activate=False)
         try:
+            self.directory = tempfile.TemporaryDirectory(prefix="harnessfleet-client-")
+            self.path = str(Path(self.directory.name) / "broker.sock")
+            self.server = Server(self.path, Handler, bind_and_activate=False)
             self.server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             self.server.server_bind()
             self.server.server_activate()
         except OSError:
-            self.server.server_close()
-            self.directory.cleanup()
+            if self.server is not None:
+                self.server.server_close()
+            if self.directory is not None:
+                self.directory.cleanup()
             raise FleetError("delegation_transport", "Cannot initialize the managed delegation endpoint")
         self.thread = threading.Thread(
             target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True

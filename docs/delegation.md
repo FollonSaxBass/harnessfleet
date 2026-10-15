@@ -6,6 +6,20 @@ launching a child. Model-free sandbox probes reproduce `EPERM` in read-only and
 workspace-write. No implicit network widening or direct-storage fallback is allowed.
 The deterministic protocol tests below do not qualify that native sandbox path.
 
+Runs default to `--delegation leaf`, or `delegation="leaf"` in Python. Leaf runs
+receive no delegation capability, endpoint or delegation skill instruction. They
+retain a managed-context marker: attempts to delegate fail without opening Store.
+This also applies on continuation. Leaf execution does not require a transport.
+
+`--delegation required` requests delegation explicitly. Both the inherited grant
+and current policy must select `delegation_transport: "experimental-unix-v1"` and
+`experimental: true`. Missing transport configuration means `disabled`. A Route
+may disable it independently. Required execution refuses before admission when
+disabled, with dispatch and continuation revalidation. Selection is recorded per
+generation; a leaf continuation cannot acquire delegation. Experimental opt-in
+permits transport investigation; it does not certify native connectivity. Do not
+enable it expecting Codex CLI 0.162.1 delegation to work in its default sandbox.
+
 Managed host CLI and Python clients select a generation-specific Unix socket before
 opening a registry or loading instance configuration. Native environments receive
 no instance config/state location, and Codex receives no registry writable root.

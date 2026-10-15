@@ -25,6 +25,8 @@ PUBLIC = (
     "billing",
     "model",
     "permission",
+    "delegation",
+    "delegation_transport",
     "cwd",
     "parent_run",
     "parent_generation",
@@ -93,6 +95,9 @@ class RunManager:
         result = []
         for route in data["routes"]:
             a = self.adapters.get(route["harness"])
+            transport = route.get(
+                "delegation_transport", data["policy"].get("delegation_transport", "disabled")
+            )
             row = {
                 k: route.get(k)
                 for k in (
@@ -108,9 +113,17 @@ class RunManager:
             }
             row["permitted"] = route["id"] in data["policy"]["routes"]
             row["execution_boundary"] = {
-                "delegation_transport": "unix-v1"
-                if route.get("environment", "host") == "host" and a and a.capabilities.launch
+                "delegation_transport": transport
+                if route.get("environment", "host") == "host"
                 else "unsupported",
+                "delegation_qualification": "unqualified",
+                "delegation_reason": "Transport disabled; select explicit experimental transport to test"
+                if transport == "disabled"
+                else (
+                    "Codex CLI 0.162.1 native sandbox connectivity is blocked"
+                    if route["harness"] == "codex_cli"
+                    else "Experimental transport has no native qualification"
+                ),
                 "worker_isolation": "unsupported",
                 "requested_isolation": route.get(
                     "worker_isolation", data["policy"].get("worker_isolation", "trusted")
@@ -179,6 +192,28 @@ class RunManager:
                 raise FleetError("target", "Target is outside the inherited selection constraints")
         if run["permission"] not in cap.permissions:
             raise FleetError("permission", "Adapter cannot enforce the requested permission mode")
+        if run.get("parent_run") and any(
+            g.get("delegation_transport", "disabled") != "experimental-unix-v1" or not g.get("experimental")
+            for g in grants
+        ):
+            raise FleetError("delegation_transport", "Parent delegation transport authorization was revoked")
+        if run.get("delegation", "leaf") == "required":
+            transport = route.get(
+                "delegation_transport", cfg["policy"].get("delegation_transport", "disabled")
+            )
+            if (
+                transport != "experimental-unix-v1"
+                or run.get("delegation_transport") != transport
+                or route.get("environment", "host") != "host"
+                or any(
+                    g.get("delegation_transport", "disabled") != transport or not g.get("experimental")
+                    for g in grants
+                )
+            ):
+                raise FleetError(
+                    "delegation_transport",
+                    "Required delegation transport is disabled or unavailable; no fallback was made",
+                )
         if run["model"] not in route.get("models", []):
             raise FleetError(
                 "model", "Requested model is unavailable on this Route; no substitution was made"
@@ -211,6 +246,8 @@ class RunManager:
         if not rid:
             return None
         parent = self.store.get(rid, c)
+        if parent.get("delegation", "leaf") != "required":
+            raise FleetError("parent", "Leaf runs cannot originate delegation")
         if parent["status"] != "running" or not hmac.compare_digest(
             parent["child_token"], authority["token"]
         ):
@@ -261,8 +298,11 @@ class RunManager:
         selection=None,
         auto_resume=0,
         caller=None,
+        delegation="leaf",
     ):
         processes.require_linux()
+        if delegation not in ("leaf", "required"):
+            raise FleetError("delegation_transport", "Select leaf or required delegation explicitly")
         if not isinstance(assignment, str) or not assignment.strip() or len(assignment) > 65536:
             raise FleetError("assignment", "Assignment must contain 1..65536 characters")
         if type(auto_resume) is not int or not 0 <= auto_resume <= 3:
@@ -308,6 +348,12 @@ class RunManager:
                 billing=billing,
                 model=model,
                 permission=permission,
+                delegation=delegation,
+                delegation_transport=native_route.get(
+                    "delegation_transport", cfg["policy"].get("delegation_transport", "disabled")
+                )
+                if delegation == "required"
+                else "disabled",
                 cwd=str(Path(cwd or Path.cwd()).resolve()),
                 assignment=assignment,
                 parent_run=parent["id"] if parent else None,

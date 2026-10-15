@@ -66,6 +66,14 @@ if 'mode:recursive' in task:
 elif 'mode:forbidden-child' in task:
     p=subprocess.run([sys.executable,'-m','harnessfleet','run','start','--route','claude-local','--model','model-b','--permission','delegate','mode:leaf'],capture_output=True,text=True)
     output='Child refusal: '+json.loads(p.stderr)['error']['code']
+elif 'mode:leaf-context' in task:
+    from harnessfleet import RunManager,FleetError
+    from harnessfleet.storage import Store
+    def forbidden(*args,**kwargs):raise AssertionError('Leaf attempted Store access')
+    Store.__init__=forbidden
+    try:RunManager().start('claude-local','mode:leaf');code='UNAUTHORIZED_SUCCESS'
+    except FleetError as error:code=error.code
+    output=json.dumps({'broker':bool(os.environ.get('HARNESSFLEET_BROKER')),'token':bool(os.environ.get('HARNESSFLEET_PARENT_TOKEN')),'result':code,'skill_instruction':'For permitted delegation read' in task})
 elif 'mode:caller-cwd' in task:
     from harnessfleet import RunManager
     os.chdir('caller')
@@ -158,6 +166,7 @@ def instance(tmp_path, monkeypatch):
         cwd_roots=[str(tmp_path)],
         experimental=True,
         max_parallel=5,
+        delegation_transport="experimental-unix-v1",
     )
     cfg["routes"] = [
         {
@@ -215,6 +224,7 @@ def instance(tmp_path, monkeypatch):
             return [json.loads(line) for line in witness.read_text().splitlines()] if witness.exists() else []
 
         def start(self, task="mode:normal", **kwargs):
+            kwargs.setdefault("delegation", "required")
             return self.m.start("codex-local", task, **kwargs)
 
         def finish(self, run):

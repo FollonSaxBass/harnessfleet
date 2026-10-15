@@ -12,3 +12,12 @@ same-UID filesystem/process separation. This first step provides scoped delegati
 for trusted workers. Hostile-worker isolation, protected administration and explicit
 unmanaged-caller enrollment require a separately qualified confinement backend.
 Refuse isolation requirements while that backend is absent.
+
+## Scoped transport staging
+
+Native Codex qualification exposed a Unix connection denial. Keep the transport
+default-disabled independently of experimental execution. Starts default to leaf
+execution without a capability or delegation instructions. Required delegation is
+an explicit option with grant/policy opt-in, dispatch and continuation checks.
+Earlier native proofs do not qualify this transport. Preserve the separate working
+deployment while investigating a compatible, attributable IPC mechanism.

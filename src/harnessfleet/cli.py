@@ -56,6 +56,7 @@ def parser():
     start.add_argument("--selection", type=json.loads)
     start.add_argument("--auto-resume", type=int, default=0)
     start.add_argument("--request-id")
+    start.add_argument("--delegation", choices=("leaf", "required"), default="leaf")
     many = r.add_parser("batch")
     many.add_argument("assignment")
     many.add_argument("--targets", type=json.loads, required=True)
@@ -65,6 +66,7 @@ def parser():
     many.add_argument("--permission", default="read-only")
     many.add_argument("--queue", action="store_true")
     many.add_argument("--request-id")
+    many.add_argument("--delegation", choices=("leaf", "required"), default="leaf")
     li = r.add_parser("list")
     li.add_argument("--offset", type=int, default=0)
     li.add_argument("--limit", type=int, default=50)
@@ -233,6 +235,7 @@ def execute(args):
             queue=args.queue,
             selection=args.selection,
             auto_resume=args.auto_resume,
+            delegation=args.delegation,
             **request,
         )
     if action == "batch":
@@ -244,6 +247,7 @@ def execute(args):
             billing=args.billing,
             permission=args.permission,
             queue=args.queue,
+            delegation=args.delegation,
             **request,
         )
     if action == "list":

@@ -8,6 +8,74 @@ import pytest
 from harnessfleet import FleetError, processes
 
 
+def test_missing_transport_opt_in_refuses_required_delegation_before_admission(instance):
+    instance.config["policy"].pop("delegation_transport", None)
+    instance.save()
+    result = instance.cli(
+        "run", "start", "--route", "codex-local", "--delegation", "required", "task", ok=False
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stderr)["error"]["code"] == "delegation_transport"
+    assert instance.m.list()["total"] == 0 and not instance.calls()
+
+
+def test_leaf_run_has_no_capability_and_cannot_open_store_or_delegate(instance):
+    instance.config["policy"].pop("delegation_transport", None)
+    instance.save()
+    parent = json.loads(
+        instance.cli(
+            "run", "start", "--route", "codex-local", "--delegation", "leaf", "mode:leaf-context"
+        ).stdout
+    )
+    assert instance.finish(parent)["status"] == "finished"
+    outcome = json.loads(instance.m.output(parent["id"])["text"])
+    assert outcome == {
+        "broker": False,
+        "token": False,
+        "result": "delegation_transport",
+        "skill_instruction": False,
+    }
+    assert instance.m.list()["total"] == 1 and len(instance.calls()) == 1
+
+
+def test_disabling_transport_revalidates_queued_work_and_resume(instance):
+    active = instance.start("mode:slow")
+    queued = instance.start(queue=True)
+    instance.m.stop(active["id"])
+    completed = instance.m.start("claude-local", "mode:leaf", delegation="required")
+    assert instance.finish(completed)["status"] == "finished"
+    before = len(instance.calls())
+    instance.config["policy"]["delegation_transport"] = "disabled"
+    instance.save()
+    dispatch = instance.m.dispatch()
+    assert not dispatch["dispatched"]
+    rejected = instance.m.status(queued["id"])
+    assert rejected["status"] == "rejected" and not rejected["invoked"]
+    assert rejected["failure"] == "delegation_transport"
+    with pytest.raises(FleetError) as error:
+        instance.m.resume(completed["id"], "follow-up")
+    assert error.value.code == "delegation_transport"
+    assert instance.m.status(completed["id"])["generation"] == 1
+    assert len(instance.calls()) == before
+
+
+def test_disabling_transport_revokes_new_children_from_an_existing_parent(instance):
+    watch = processes.Changes(instance.path)
+    try:
+        parent = instance.start("mode:recursive mode:slow")
+        deadline = time.monotonic() + 5
+        while not instance.calls():
+            assert time.monotonic() < deadline
+            watch.wait(1)
+        instance.config["policy"]["delegation_transport"] = "disabled"
+        instance.save()
+        assert instance.finish(parent)["status"] == "finished"
+        assert "delegation_transport" in instance.m.output(parent["id"])["text"]
+        assert instance.m.list()["total"] == 1 and len(instance.calls()) == 1
+    finally:
+        watch.close()
+
+
 def test_native_delegation_cannot_observe_or_stop_an_unrelated_run(instance, monkeypatch):
     victim = instance.m.start("claude-local", "mode:slow")
     monkeypatch.setenv("HF_TEST_VICTIM", victim["id"])

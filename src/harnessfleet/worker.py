@@ -135,7 +135,6 @@ def supervise(rid, generation):
             native_env.update(
                 HARNESSFLEET_PARENT_RUN=rid,
                 HARNESSFLEET_PARENT_GENERATION=str(generation),
-                HARNESSFLEET_PARENT_TOKEN=run["child_token"],
                 HARNESSFLEET_EXECUTION=marker,
                 AGENT_IDENTITY=run["identity"],
             )
@@ -145,16 +144,23 @@ def supervise(rid, generation):
                 "HARNESSFLEET_SERVICE_TOKEN",
                 "HARNESSFLEET_BROKER",
                 "HARNESSFLEET_BROKER_OWNER",
+                "HARNESSFLEET_PARENT_TOKEN",
             ):
                 native_env.pop(key, None)
             # The skill is a bounded explicit reference, not a parent conversation export.
             from importlib.resources import files
 
+            delegates = run.get("delegation", "leaf") == "required"
             skill = str(files("harnessfleet").joinpath("skill/SKILL.md"))
             run["assignment"] = (
                 f"Execution identity: {run['identity']}. "
-                f"For permitted delegation read the common skill at {skill}. "
-                "Never change billing or substitute an explicitly requested target.\n\n" + run["assignment"]
+                + (
+                    f"For permitted delegation read the common skill at {skill}. "
+                    if delegates
+                    else "This is a leaf run. Managed delegation is unavailable. "
+                )
+                + "Never change billing or substitute an explicitly requested target.\n\n"
+                + run["assignment"]
             )
             if is_box:
                 # Box accounts, config and executable paths belong to the image.
@@ -170,8 +176,9 @@ def supervise(rid, generation):
                 command = adapter.command(run, str(directory))
                 from .delegation import Portal
 
-                portal = Portal(m, rid, generation)
-                native_env.update(portal.environment())
+                if delegates:
+                    portal = Portal(m, rid, generation)
+                    native_env.update(portal.environment(), HARNESSFLEET_PARENT_TOKEN=run["child_token"])
             # Receipt is consumed before Popen; a crash here is ambiguous, never replayable.
             run.update(invoked=True, status="running", updated_at=time.time())
             s.save(c, run, "invocation_consumed")

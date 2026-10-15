@@ -233,7 +233,15 @@ def test_read_only_grant_cannot_delegate_writes(instance):
 def test_codex_continuation_uses_broker_without_state_write_roots(instance, permission):
     run = json.loads(
         instance.cli(
-            "run", "start", "--route", "codex-local", "--permission", permission, "assignment"
+            "run",
+            "start",
+            "--route",
+            "codex-local",
+            "--permission",
+            permission,
+            "--delegation",
+            "required",
+            "assignment",
         ).stdout
     )
     instance.finish(run)

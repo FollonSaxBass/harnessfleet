@@ -10,6 +10,13 @@ Subscription Routes on Linux. Replace model identifiers and project paths with
 values supported by your installed native CLIs. Enable only Routes and permission
 modes you intend to authorize.
 
+The example permits leaf execution. Delegation transport defaults to `disabled`,
+independently of the general experimental flag. Experimental investigation requires
+`policy.delegation_transport: "experimental-unix-v1"`, `experimental: true` and
+an explicit `--delegation required` launch. Route-level `delegation_transport` can
+disable it. The inherited grant and current policy must both retain authorization.
+The current native Codex socket path is blocked; see [delegation](delegation.md).
+
 ```json
 {
   "schema_version": 1,
