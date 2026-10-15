@@ -148,7 +148,7 @@ class RunManager:
             raise FleetError("target", "Requested Route is unavailable; no substitution was made")
         return copy.deepcopy(found[0])
 
-    def _validate(self, run, cfg, *, dispatch=False):
+    def _validate(self, run, cfg, c, *, dispatch=False):
         route = self._route(run["route_id"], cfg)
         if any(
             boundary.get("worker_isolation", "trusted") != "trusted"
@@ -192,11 +192,19 @@ class RunManager:
                 raise FleetError("target", "Target is outside the inherited selection constraints")
         if run["permission"] not in cap.permissions:
             raise FleetError("permission", "Adapter cannot enforce the requested permission mode")
-        if run.get("parent_run") and any(
-            g.get("delegation_transport", "disabled") != "experimental-unix-v1" or not g.get("experimental")
-            for g in grants
-        ):
-            raise FleetError("delegation_transport", "Parent delegation transport authorization was revoked")
+        if run.get("parent_run"):
+            parent = self.store.get(run["parent_run"], c)
+            parent_route = self._route(parent["route_id"], cfg)
+            if parent_route.get(
+                "delegation_transport", cfg["policy"].get("delegation_transport", "disabled")
+            ) != "experimental-unix-v1" or any(
+                g.get("delegation_transport", "disabled") != "experimental-unix-v1"
+                or not g.get("experimental")
+                for g in grants
+            ):
+                raise FleetError(
+                    "delegation_transport", "Parent delegation transport authorization was revoked"
+                )
         if run.get("delegation", "leaf") == "required":
             transport = route.get(
                 "delegation_transport", cfg["policy"].get("delegation_transport", "disabled")
@@ -374,7 +382,7 @@ class RunManager:
                 invocation_count=0,
             )
             run["identity"] = f"{run['harness']}:{run['environment']}:{run['account']}:{run['model']}"
-            self._validate(run, cfg)
+            self._validate(run, cfg, c)
             rows = self.store.all(c)
             if not self._capacity(run, rows, cfg):
                 if not queue:
@@ -684,7 +692,7 @@ class RunManager:
                 if run["status"] != "queued":
                     continue
                 try:
-                    self._validate(run, cfg, dispatch=True)
+                    self._validate(run, cfg, c, dispatch=True)
                     if run.get("parent_run"):
                         p = self.store.get(run["parent_run"], c)
                         if p["status"] != "running" or p["generation"] != run["parent_generation"]:
@@ -772,7 +780,7 @@ class RunManager:
                 pgid=None,
                 updated_at=time.time(),
             )
-            self._validate(run, cfg, dispatch=True)
+            self._validate(run, cfg, c, dispatch=True)
             rows = self.store.all(c)
             if not self._capacity(run, rows, cfg):
                 raise FleetError("capacity", "Route capacity is occupied")

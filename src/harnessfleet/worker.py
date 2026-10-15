@@ -126,7 +126,7 @@ def supervise(rid, generation):
                 return 2
             run["supervisor"] = processes.receipt(os.getpid())
             run["pgid"] = os.getpgrp()
-            route, adapter = m._validate(run, m.configuration(), dispatch=True)
+            route, adapter = m._validate(run, m.configuration(), c, dispatch=True)
             is_box = run["environment"].startswith("box:")
             readiness = {"available": True} if is_box else adapter.diagnose(route)
             if not readiness.get("available"):

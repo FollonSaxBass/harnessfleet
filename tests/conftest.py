@@ -66,6 +66,26 @@ if 'mode:recursive' in task:
 elif 'mode:forbidden-child' in task:
     p=subprocess.run([sys.executable,'-m','harnessfleet','run','start','--route','claude-local','--model','model-b','--permission','delegate','mode:leaf'],capture_output=True,text=True)
     output='Child refusal: '+json.loads(p.stderr)['error']['code']
+elif 'mode:held-child' in task:
+    from pathlib import Path
+    from harnessfleet import RunManager,FleetError,processes
+    m=RunManager()
+    child=m.start('claude-local','mode:leaf',queue=True)
+    if 'action:resume' in task:m.wait(child['id'],10)
+    watch=processes.Changes(Path(os.environ['HF_TEST_CHILD_READY']).parent)
+    try:
+        Path(os.environ['HF_TEST_CHILD_READY']).write_text('ready')
+        if 'action:resume' in task:
+            deadline=time.monotonic()+15
+            while not Path(os.environ['HF_TEST_CHILD_RELEASE']).exists():
+                assert time.monotonic()<deadline
+                watch.wait(1)
+            try:m.resume(child['id'],'bounded continuation');output='UNAUTHORIZED_RESUME'
+            except FleetError as error:output=error.code
+        else:
+            final=m.wait(child['id'],15)
+            output=final['status']+' '+str(final['failure'])
+    finally:watch.close()
 elif 'mode:leaf-context' in task:
     from harnessfleet import RunManager,FleetError
     from harnessfleet.storage import Store

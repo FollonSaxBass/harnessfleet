@@ -59,7 +59,8 @@ def test_disabling_transport_revalidates_queued_work_and_resume(instance):
     assert len(instance.calls()) == before
 
 
-def test_disabling_transport_revokes_new_children_from_an_existing_parent(instance):
+@pytest.mark.parametrize("scope", ["policy", "route"])
+def test_disabling_transport_revokes_new_children_from_an_existing_parent(instance, scope):
     watch = processes.Changes(instance.path)
     try:
         parent = instance.start("mode:recursive mode:slow")
@@ -67,11 +68,42 @@ def test_disabling_transport_revokes_new_children_from_an_existing_parent(instan
         while not instance.calls():
             assert time.monotonic() < deadline
             watch.wait(1)
-        instance.config["policy"]["delegation_transport"] = "disabled"
+        authority = instance.config["policy"] if scope == "policy" else instance.config["routes"][0]
+        authority["delegation_transport"] = "disabled"
         instance.save()
         assert instance.finish(parent)["status"] == "finished"
         assert "delegation_transport" in instance.m.output(parent["id"])["text"]
         assert instance.m.list()["total"] == 1 and len(instance.calls()) == 1
+    finally:
+        watch.close()
+
+
+@pytest.mark.parametrize("operation", ["queued", "resume"])
+def test_parent_route_revocation_revalidates_existing_children(instance, monkeypatch, operation):
+    ready = instance.path / "child-ready"
+    release = instance.path / "continue-child"
+    monkeypatch.setenv("HF_TEST_CHILD_READY", str(ready))
+    monkeypatch.setenv("HF_TEST_CHILD_RELEASE", str(release))
+    victim = instance.m.start("claude-local", "mode:slow") if operation == "queued" else None
+    watch = processes.Changes(instance.path)
+    try:
+        parent = instance.start("mode:held-child action:" + operation)
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            assert time.monotonic() < deadline
+            watch.wait(1)
+        instance.config["routes"][0]["delegation_transport"] = "disabled"
+        instance.save()
+        if victim:
+            instance.m.stop(victim["id"])
+            assert not instance.m.dispatch()["dispatched"]
+        else:
+            release.write_text("continue")
+        assert instance.finish(parent)["status"] == "finished"
+        assert "delegation_transport" in instance.m.output(parent["id"])["text"]
+        children = [r for r in instance.m.list()["runs"] if r.get("parent_run") == parent["id"]]
+        assert len(children) == 1 and children[0]["generation"] == 1
+        assert children[0]["status"] == ("rejected" if operation == "queued" else "finished")
     finally:
         watch.close()
 
