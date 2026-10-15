@@ -152,6 +152,33 @@ def test_browser_expansion_and_source_loss_preserve_context(dashboard, instance)
         browser.close()
 
 
+def test_browser_filter_during_initial_load_is_not_lost(dashboard):
+    from playwright.sync_api import sync_playwright, expect
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        pending = []
+
+        def delay_initial_graph(route):
+            if not pending:
+                pending.append(route)
+            else:
+                route.continue_()
+
+        page.route("**/api/graph?*", delay_initial_graph)
+        page.clock.install()
+        with page.expect_request("**/api/graph?*"):
+            page.goto(dashboard)
+        page.locator("#filter").fill("Nested reviewer")
+        page.clock.fast_forward(1000)
+        assert pending, "Initial graph request must still be held while the filter changes"
+        pending[0].continue_()
+        expect(page.locator(".select")).to_have_count(1)
+        expect(page.get_by_role("button", name="Expand Agent 000", exact=True)).to_be_enabled()
+        browser.close()
+
+
 def test_browser_observes_cursor_without_a_chat_store(dashboard, instance):
     from playwright.sync_api import sync_playwright, expect
 
