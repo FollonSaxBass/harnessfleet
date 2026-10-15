@@ -172,6 +172,29 @@ def test_cursor_latest_reply_is_bounded_and_redacted_after_large_history(instanc
     assert any(issue["code"] == "cursor_transcript_partial" for issue in page["issues"])
 
 
+@pytest.mark.parametrize("huge_reply", [False, True])
+def test_cursor_windowed_history_never_presents_head_reply_as_latest(instance, huge_reply):
+    root = instance.path / "agent-transcripts"
+    records = [message("user", "Inspect history"), message("assistant", "STALE HEAD REPLY")]
+    if huge_reply:
+        records.append(message("assistant", "Latest " + "x" * 400000))
+    else:
+        records += [
+            {"type": "progress", "data": "x" * 200000},
+            message("assistant", "LATEST IN OMITTED MIDDLE"),
+            {"type": "progress", "data": "x" * 200000},
+        ]
+    records.append({"type": "turn_ended", "status": "success"})
+    transcript(root / SESSION / (SESSION + ".jsonl"), records)
+    connect_cursor(instance, root)
+    graph = Graph(instance.m)
+    page = graph.page()
+    node = page["nodes"][0]
+    assert node["label"] == "Inspect history"
+    assert not node["output_available"]
+    assert any(issue["code"] == "cursor_transcript_partial" for issue in page["issues"])
+
+
 def test_cursor_subagent_identifiers_do_not_merge_across_sessions(instance):
     root = instance.path / "agent-transcripts"
     for identifier in [SESSION, CHILD]:

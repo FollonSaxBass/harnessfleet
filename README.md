@@ -10,6 +10,7 @@ The dashboard binds to `127.0.0.1:8421`. It can close without stopping workers.
 This is an alpha implementation of the [product specification](docs/specification.md).
 The [support matrix](docs/support.md) separates deterministic tests, native evidence
 and capabilities that remain disabled. A successful synthetic demo is not native certification.
+The [remaining work](docs/remaining-work.md) lists ticket-sized gaps and acceptance evidence.
 
 ![Synthetic local dashboard with expandable branches and observed replies](docs/images/dashboard.png)
 

@@ -3,12 +3,74 @@ import os
 import subprocess
 import sqlite3
 import sys
+import signal
+import select
+from types import SimpleNamespace
 from pathlib import Path
 import pytest
 from harnessfleet import FleetError
 from harnessfleet.integration import compatibility, install_skill
 from harnessfleet.config import initialize
 from harnessfleet import processes
+from harnessfleet import service
+
+
+@pytest.fixture
+def paused_controller(instance):
+    started = service.start(instance.m)
+    fd = processes.pidfd_open(started["process"]["pid"])
+    processes.signal_fd(fd, signal.SIGSTOP)
+    try:
+        yield fd
+    finally:
+        if service.status(instance.m)["running"]:
+            processes.signal_fd(fd, signal.SIGCONT)
+            service.stop(instance.m)
+        assert select.select([fd], [], [], 5)[0], "Owned test controller did not exit"
+        os.close(fd)
+
+
+@pytest.mark.parametrize("lost", [False, True])
+def test_recovery_preserves_pending_admission_only_with_live_controller(
+    instance, paused_controller, monkeypatch, lost
+):
+    run = instance.start()
+    assert run["status"] == "starting" and not run["invoked"]
+    if lost:
+        processes.signal_fd(paused_controller, signal.SIGKILL)
+        assert select.select([paused_controller], [], [], 5)[0]
+    with monkeypatch.context() as clock:
+        clock.setattr("harnessfleet.manager.time", SimpleNamespace(time=lambda: run["updated_at"] + 10))
+        instance.m.recover(run["id"])
+    current = instance.m.status(run["id"])
+    if lost:
+        assert current["status"] == "uncertain" and not current["cleanup_confirmed"]
+        assert not instance.calls()
+    else:
+        assert current["status"] == "starting" and not current["invoked"]
+        processes.signal_fd(paused_controller, signal.SIGCONT)
+        assert instance.finish(run)["status"] == "finished"
+        assert [call["run"] for call in instance.calls()] == [run["id"]]
+
+
+@pytest.mark.parametrize("token", [None, "synthetic-unregistered", "registered-copy"])
+def test_service_run_requires_controller_registration(instance, paused_controller, monkeypatch, token):
+    if token == "registered-copy":
+        pid = service.status(instance.m)["process"]["pid"]
+        token = next(
+            value.split(b"=", 1)[1].decode()
+            for value in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            if value.startswith(b"HARNESSFLEET_SERVICE_TOKEN=")
+        )
+    if token is None:
+        monkeypatch.delenv("HARNESSFLEET_SERVICE_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("HARNESSFLEET_SERVICE_TOKEN", token)
+    executable = Path(sys.executable).parent / "harnessfleet"
+    result = subprocess.run([str(executable), "service", "run"], capture_output=True, text=True, timeout=2)
+    assert result.returncode == 2
+    assert json.loads(result.stderr)["error"]["code"] == "service"
+    assert not instance.calls()
 
 
 def test_corrupt_database_returns_contract_error_without_modification(instance):
@@ -155,6 +217,7 @@ def test_host_controller_launches_roots_independently(instance):
         assert instance.finish(run)["status"] == "finished"
         assert instance.m.output(run["id"])["verified"]
         assert len(instance.calls()) == 1
+        assert not instance.calls()[0]["service_token_present"]
         pid = started["process"]["pid"]
         fd = processes.pidfd_open(pid)
         try:

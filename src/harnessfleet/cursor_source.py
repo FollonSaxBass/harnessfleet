@@ -60,7 +60,7 @@ def records(parent, name, budget):
             chunks = [stream.read(limit)]
             budget[0] -= len(chunks[0])
     parsed, malformed = [], False
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         for line in chunk.splitlines():
             if not line.strip():
                 continue
@@ -68,6 +68,9 @@ def records(parent, name, budget):
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise ValueError()
+                # A windowed head supplies the session label, never current output/status.
+                if limited and index == 0 and record.get("role") != "user":
+                    continue
                 parsed.append(record)
             except (ValueError, RecursionError):
                 malformed = True

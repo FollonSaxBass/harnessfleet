@@ -161,13 +161,11 @@ def supervise(rid, generation):
                 command = adapter.command(command_run, str(directory))
             else:
                 command = adapter.command(run, str(directory))
-            if (
-                run["harness"] == "codex_cli"
-                and run["permission"] == "workspace-write"
-                and generation == 1
-                and not is_box
-            ):
-                command[2:2] = ["--add-dir", str(s.root)]
+            if run["harness"] == "codex_cli" and run["permission"] == "workspace-write" and not is_box:
+                command[-2:-2] = [
+                    "-c",
+                    "sandbox_workspace_write.writable_roots=" + json.dumps([str(s.root)]),
+                ]
             # Receipt is consumed before Popen; a crash here is ambiguous, never replayable.
             run.update(invoked=True, status="running", updated_at=time.time())
             s.save(c, run, "invocation_consumed")

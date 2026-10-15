@@ -124,18 +124,25 @@ def serve(manager):
     ):
         raise FleetError("box_origin", "Boxes cannot originate managed execution controllers")
     token = os.environ.get("HARNESSFLEET_SERVICE_TOKEN")
-    if token:
-        # Registration transaction in start must finish before the child checks it.
+    process = processes.receipt(os.getpid())
+
+    def registered():
+        # The registration transaction in start finishes before this read.
         current = read(manager)
-        if not current or not secrets.compare_digest(current["token"], token):
-            raise FleetError("service", "Obsolete controller was fenced")
+        return bool(
+            token
+            and current
+            and secrets.compare_digest(current["token"], token)
+            and current["process"] == process
+        )
+
+    if not registered():
+        raise FleetError("service", "Controller registration is missing or obsolete")
     watch = processes.Changes(manager.store.root)
     try:
         while True:
-            if token:
-                current = read(manager)
-                if not current or current["token"] != token:
-                    return
+            if not registered():
+                return
             controller_once(manager)
             watch.wait(30)
     finally:

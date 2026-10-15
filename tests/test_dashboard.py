@@ -152,6 +152,52 @@ def test_browser_expansion_and_source_loss_preserve_context(dashboard, instance)
         browser.close()
 
 
+def test_browser_disabled_expanded_source_does_not_block_surviving_branches(dashboard, instance):
+    from playwright.sync_api import sync_playwright, expect
+
+    populate(instance, count=1)
+    survivor = instance.path / "survivor.json"
+    survivor.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "completeness": "complete",
+                "nodes": [
+                    {"id": "root", "label": "Surviving root"},
+                    {"id": "child", "parent": "root", "label": "Surviving child"},
+                ],
+            }
+        )
+    )
+    instance.config["sources"].append(
+        {**instance.config["sources"][0], "id": "survivor", "path": str(survivor)}
+    )
+    instance.save()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        page.goto(dashboard)
+        page.get_by_role("button", name="Expand Agent 000", exact=True).click()
+        page.get_by_role("button", name="Expand Surviving root", exact=True).click()
+        selected = page.get_by_role("treeitem", name="Surviving child", exact=False)
+        selected.click()
+        focus = selected.get_attribute("data-focus")
+        instance.config["sources"][0]["enabled"] = False
+        instance.save()
+        page.evaluate("() => refresh()")
+        expect(page.locator("#health")).to_have_text("Updated")
+        expect(page.get_by_role("button", name="Expand Agent 000", exact=True)).to_have_count(0)
+        expect(selected).to_have_attribute("aria-selected", "true")
+        expect(page.get_by_role("button", name="Expand Surviving root", exact=True)).to_have_attribute(
+            "aria-expanded", "true"
+        )
+        assert page.evaluate("document.activeElement.dataset.focus") == focus
+        page.evaluate("() => refresh()")
+        expect(page.locator("#health")).to_have_text("Updated")
+        expect(selected).to_be_visible()
+        browser.close()
+
+
 def test_browser_filter_during_initial_load_is_not_lost(dashboard):
     from playwright.sync_api import sync_playwright, expect
 

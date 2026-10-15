@@ -30,6 +30,9 @@ Required sets use `selection.required`; allowed sets use `selection.allowed`.
 `start_many` returns every target with either `run` or an explicit `error` and an
 `all_started` flag. Native unavailability may be discovered by the asynchronous
 worker after admission; followers/output remain the final authority.
+Malformed target members receive `selection` errors without hiding valid members'
+admitted run ids. Malformed explicit selection constraints reject the entire request
+before admission. A failed batch is not permission to repeat its successful members.
 
 Public Agent Run fields include stable `id`, current `generation`, lifecycle `status`,
 Route/harness/environment/account/billing/model/permission, cwd, derived identity,

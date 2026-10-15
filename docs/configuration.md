@@ -133,7 +133,10 @@ At most 256 KiB is read per transcript, using its beginning and end for larger
 files, and at most 16 MiB per source snapshot. Every discovered session and supported
 child remains in the graph when the read budget is exhausted; unread content stays
 unknown and produces an explicit issue. Malformed/missing files and rejected links
-are reported without hiding readable sessions. Source completeness stays partial
+are reported without hiding readable sessions. For windowed reads, the beginning
+supplies labels; only complete assistant records
+in the ending window supply observed output. If none is readable there, output is
+unavailable even when an older reply was readable at the beginning. Completeness stays partial
 because transcripts cannot prove complete native ancestry or lifecycle. Root,
 session, child-directory and transcript symlinks are refused. Native compatibility
 is covered by synthetic fixtures; broader native tracing qualification remains open.

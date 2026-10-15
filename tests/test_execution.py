@@ -88,6 +88,46 @@ def test_required_selection_cannot_omit_members(instance):
     assert not instance.calls()
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [{"route": "codex-local"}, None, "codex-local", [], {"model": "a"}, {"route": "", "model": "a"}],
+)
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_batch_accounts_for_malformed_member_without_losing_admitted_run(instance, invalid, invalid_first):
+    targets = [{"route": "codex-local", "model": "model-a"}, invalid]
+    if invalid_first:
+        targets.reverse()
+    result = instance.cli("run", "batch", "assignment", "--targets", json.dumps(targets), ok=False)
+    assert result.returncode == 1, result.stderr
+    response = json.loads(result.stdout)
+    assert not response["all_started"]
+    assert response["results"][0 if invalid_first else 1]["error"]["code"] == "selection"
+    run = response["results"][1 if invalid_first else 0]["run"]
+    assert instance.finish(run)["status"] == "finished"
+    assert [call["run"] for call in instance.calls()] == [run["id"]]
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [[], {"allowed": "codex-local"}, {"required": [None]}, {"allowed": [{"route": "codex-local"}]}],
+)
+def test_malformed_batch_constraints_are_rejected_before_admission(instance, selection):
+    targets = [{"route": "codex-local", "model": "model-a"}]
+    result = instance.cli(
+        "run",
+        "batch",
+        "assignment",
+        "--targets",
+        json.dumps(targets),
+        "--selection",
+        json.dumps(selection),
+        ok=False,
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stderr)["error"]["code"] == "selection"
+    assert instance.m.list()["total"] == 0 and not instance.calls()
+
+
 def test_capacity_queue_and_cancellation(instance):
     r = instance.start("mode:slow")
     with pytest.raises(FleetError) as e:
@@ -165,6 +205,30 @@ def test_read_only_grant_cannot_delegate_writes(instance):
     assert instance.finish(run)["status"] == "finished"
     assert instance.m.output(run["id"])["text"] == "Child refusal: permission"
     assert len(instance.calls()) == 1
+
+
+@pytest.mark.parametrize("permission", ["read-only", "workspace-write"])
+def test_codex_state_write_access_is_preserved_on_continuation(instance, permission):
+    run = json.loads(
+        instance.cli(
+            "run", "start", "--route", "codex-local", "--permission", permission, "assignment"
+        ).stdout
+    )
+    instance.finish(run)
+    continuation = json.loads(instance.cli("run", "resume", run["id"], "follow-up").stdout)
+    assert instance.finish(continuation)["status"] == "finished"
+    calls = instance.calls()
+    assert len(calls) == 2 and "resume" in calls[1]["args"]
+    for call in calls:
+        roots = [arg for arg in call["args"] if arg.startswith("sandbox_workspace_write.writable_roots=")]
+        if permission == "workspace-write":
+            if "--add-dir" in call["args"] and "resume" not in call["args"]:
+                assert call["args"][call["args"].index("--add-dir") + 1] == str(instance.path / "state")
+                continue
+            assert len(roots) == 1
+            assert json.loads(roots[0].split("=", 1)[1]) == [str(instance.path / "state")]
+        else:
+            assert not roots
 
 
 def test_managed_recursive_delegation(instance):
