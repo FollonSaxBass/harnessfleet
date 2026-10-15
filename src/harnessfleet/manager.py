@@ -307,8 +307,8 @@ class RunManager:
         if selection is not None and (
             not isinstance(selection, dict)
             or any(
-                not isinstance(selection.get(key, []), list)
-                or not all(valid(t) for t in selection.get(key, []))
+                selection.get(key) is not None
+                and (not isinstance(selection[key], list) or not all(valid(t) for t in selection[key]))
                 for key in ("allowed", "required")
             )
         ):
@@ -316,7 +316,7 @@ class RunManager:
         selection = selection or {"required": targets}
         if len({json.dumps(t, sort_keys=True) for t in targets}) != len(targets):
             raise FleetError("selection", "Duplicate targets are not allowed")
-        required = selection.get("required", [])
+        required = selection.get("required") or []
         missing = [t for t in required if t not in targets]
         if missing:
             raise FleetError("selection", "Every required target must be accounted for")

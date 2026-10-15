@@ -128,6 +128,28 @@ def test_malformed_batch_constraints_are_rejected_before_admission(instance, sel
     assert instance.m.list()["total"] == 0 and not instance.calls()
 
 
+@pytest.mark.parametrize(
+    "selection", [{"allowed": None}, {"required": None}, {"allowed": None, "required": None}]
+)
+def test_nullable_batch_constraints_preserve_absent_constraint_behavior(instance, selection):
+    targets = [{"route": "codex-local", "model": "model-a"}]
+    response = json.loads(
+        instance.cli(
+            "run",
+            "batch",
+            "assignment",
+            "--targets",
+            json.dumps(targets),
+            "--selection",
+            json.dumps(selection),
+        ).stdout
+    )
+    assert response["all_started"]
+    run = response["results"][0]["run"]
+    assert instance.finish(run)["status"] == "finished"
+    assert [call["run"] for call in instance.calls()] == [run["id"]]
+
+
 def test_capacity_queue_and_cancellation(instance):
     r = instance.start("mode:slow")
     with pytest.raises(FleetError) as e:

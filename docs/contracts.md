@@ -27,6 +27,8 @@ Other methods: `routes(diagnose=False)`, `list(offset=0,limit=50)`, `status(id)`
 `start` options include billing, permission, model, cwd, queue, structured selection
 and finite `auto_resume`. An exact target is `{ "route":"R", "model":"M" }`.
 Required sets use `selection.required`; allowed sets use `selection.allowed`.
+An absent or `null` constraint is unspecified; a non-null constraint must be a list
+of resolved targets. Inherited authority still applies when a constraint is unspecified.
 `start_many` returns every target with either `run` or an explicit `error` and an
 `all_started` flag. Native unavailability may be discovered by the asynchronous
 worker after admission; followers/output remain the final authority.

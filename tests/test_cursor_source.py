@@ -1,4 +1,5 @@
 import json
+import os
 import pytest
 from harnessfleet.graph import Graph
 
@@ -219,10 +220,12 @@ def test_cursor_read_budget_keeps_every_discovered_session_navigable(instance):
                 message("assistant", "x" * 300000),
             ],
         )
+        os.utime(root / identifier / (identifier + ".jsonl"), ns=(index + 1, index + 1))
     connect_cursor(instance, root)
     graph = Graph(instance.m)
     first = graph.page(limit=40)
     second = graph.page(offset=first["next_offset"], limit=40)
     assert first["total"] == 70 and len(first["nodes"]) + len(second["nodes"]) == 70
+    assert any(node["label"] == "Session 69" for node in first["nodes"] + second["nodes"])
     assert any(issue["code"] == "source_budget" for issue in first["issues"])
     assert all(not node["leaf_confirmed"] for node in first["nodes"] + second["nodes"])

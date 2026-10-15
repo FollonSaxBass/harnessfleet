@@ -135,9 +135,16 @@ def load(source):
 
     try:
         with directory(Path(source["path"]).expanduser()) as root:
-            for session in sorted(os.listdir(root)):
-                if not SESSION.fullmatch(session):
-                    continue
+
+            def modified(session):
+                try:
+                    with directory(session, root) as parent:
+                        return os.stat(session + ".jsonl", dir_fd=parent, follow_symlinks=False).st_mtime_ns
+                except OSError:
+                    return 0
+
+            sessions = [name for name in os.listdir(root) if SESSION.fullmatch(name)]
+            for session in sorted(sessions, key=lambda name: (-modified(name), name)):
                 try:
                     with directory(session, root) as parent:
                         row(parent, session + ".jsonl", session, "session")

@@ -70,3 +70,13 @@ after fourteen days. Active, kept and uncertain runs are preserved. Compact meta
 and receipts remain. `run keep ID` protects a result. Expired output fails closed;
 retention never authorizes replay. State must remain user-owned (mode 0700), with
 regular private database/artifact files and no shared untrusted writers.
+
+Native workers in this alpha must be trusted with the instance state. In particular,
+Codex workspace-write includes that directory so nested CLI requests can reach the
+registry. The database contains other runs' grants and tokens; a worker able to
+write it can bypass API grant validation or alter another run's evidence. Token
+removal from the supervisor environment does not isolate that database. Read-only
+native sandbox modes are not a separate-user confidentiality boundary either.
+Do not run mutually untrusted work in one instance. A controller-owned registry
+with a restricted delegation client and scoped artifact access is required before
+claiming worker isolation or tamper-resistant inherited authority.

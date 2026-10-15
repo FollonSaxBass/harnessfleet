@@ -131,6 +131,9 @@ There is no implicit scan of other projects, credential files or native homes.
 
 At most 256 KiB is read per transcript, using its beginning and end for larger
 files, and at most 16 MiB per source snapshot. Every discovered session and supported
+child is considered in order of its session transcript's modification time, newest
+first, with native identifiers breaking ties. Metadata ordering does not follow
+session or transcript links. Every discovered session and supported
 child remains in the graph when the read budget is exhausted; unread content stays
 unknown and produces an explicit issue. Malformed/missing files and rejected links
 are reported without hiding readable sessions. For windowed reads, the beginning
