@@ -14,6 +14,7 @@ import select
 import secrets
 import socket
 import socketserver
+import sqlite3
 import struct
 import tempfile
 import threading
@@ -68,6 +69,8 @@ class Client:
             raise FleetError("delegation_scope", "Operation is unavailable to a delegated worker")
 
         def call(*args, **kwargs):
+            if operation in {"start", "start_many"}:
+                kwargs["cwd"] = str(Path(kwargs.get("cwd") or Path.cwd()).resolve())
             request_id = kwargs.pop("request_id", None) or uuid.uuid4().hex
             if not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id):
                 raise FleetError("request", "Request id must contain 32 hexadecimal characters")
@@ -352,9 +355,15 @@ class Portal:
                 "request_uncertain",
                 f"Request {request_id} may be consumed; inspect child runs without replay",
             )
-        with manager.store.transaction() as c:
-            c.execute(
-                "UPDATE meta SET data=? WHERE key=?",
-                (json.dumps({"fingerprint": fingerprint, "response": response}), key),
+        try:
+            with manager.store.transaction() as c:
+                c.execute(
+                    "UPDATE meta SET data=? WHERE key=?",
+                    (json.dumps({"fingerprint": fingerprint, "response": response}), key),
+                )
+        except (sqlite3.Error, OSError):
+            return error_record(
+                "request_uncertain",
+                f"Receipt unavailable for request {request_id}; inspect child runs without replay",
             )
         return response

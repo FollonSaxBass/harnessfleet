@@ -1,5 +1,6 @@
 import json
 import socket
+import sqlite3
 import struct
 import time
 
@@ -35,6 +36,33 @@ def test_unavailable_transport_does_not_consume_native_invocation(instance, monk
     assert result["status"] == "failed"
     assert not result["invoked"] and not instance.calls()
     assert result["failure"] == "delegation_transport"
+
+
+@pytest.mark.parametrize(
+    "binding,operation", [("cli", "start"), ("cli", "batch"), ("python", "start"), ("python", "batch")]
+)
+@pytest.mark.parametrize("cwd", ["omitted", "relative"])
+def test_delegated_directory_resolves_at_the_native_caller(instance, binding, operation, cwd):
+    project = instance.path / "project"
+    caller = project / "caller"
+    (caller / "relative").mkdir(parents=True)
+    run = instance.start(f"mode:caller-cwd binding:{binding} operation:{operation} cwd:{cwd}", cwd=project)
+    assert instance.finish(run)["status"] == "finished"
+    assert instance.m.output(run["id"])["text"] == str(caller if cwd == "omitted" else caller / "relative")
+
+
+def test_receipt_commit_failure_exposes_request_id_without_replaying_child(instance):
+    with sqlite3.connect(instance.m.store.db) as c:
+        c.execute("""CREATE TRIGGER fail_delegation_receipt BEFORE UPDATE ON meta
+            WHEN NEW.key LIKE 'delegation:%' BEGIN SELECT RAISE(FAIL, 'synthetic unavailable receipt'); END""")
+    parent = instance.start("mode:receipt-failure")
+    assert instance.finish(parent)["status"] == "finished"
+    result = json.loads(instance.m.output(parent["id"])["text"])
+    assert result["children"] == 1 and len(instance.calls()) == 2
+    assert all(
+        row["code"] == "request_uncertain" and result["request_id"] in row["message"]
+        for row in result["outcomes"]
+    )
 
 
 @pytest.mark.parametrize("lost_reply", [False, True])

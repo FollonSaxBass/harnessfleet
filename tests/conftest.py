@@ -66,6 +66,33 @@ if 'mode:recursive' in task:
 elif 'mode:forbidden-child' in task:
     p=subprocess.run([sys.executable,'-m','harnessfleet','run','start','--route','claude-local','--model','model-b','--permission','delegate','mode:leaf'],capture_output=True,text=True)
     output='Child refusal: '+json.loads(p.stderr)['error']['code']
+elif 'mode:caller-cwd' in task:
+    from harnessfleet import RunManager
+    os.chdir('caller')
+    options={} if 'cwd:omitted' in task else {'cwd':'relative'}
+    if 'binding:cli' in task:
+        command=[sys.executable,'-m','harnessfleet','run']
+        if 'operation:batch' in task:
+            command+=['batch','--targets',json.dumps([{'route':'claude-local','model':'model-b'}])]
+        else:command+=['start','--route','claude-local','--model','model-b']
+        if options:command+=['-C',options['cwd']]
+        response=json.loads(subprocess.check_output(command+['mode:leaf'],text=True))
+    else:
+        m=RunManager()
+        response=m.start_many([{'route':'claude-local','model':'model-b'}],'mode:leaf',**options) if 'operation:batch' in task else m.start('claude-local','mode:leaf',model='model-b',**options)
+    child=response['results'][0]['run'] if 'operation:batch' in task else response
+    RunManager().wait(child['id'],10)
+    output=child['cwd']
+elif 'mode:receipt-failure' in task:
+    from harnessfleet import RunManager,FleetError
+    m=RunManager();request_id='b'*32
+    outcomes=[]
+    for _ in range(2):
+        try:m.start('claude-local','mode:leaf',request_id=request_id);outcomes.append('UNEXPECTED_SUCCESS')
+        except FleetError as error:outcomes.append({'code':error.code,'message':str(error)})
+    children=m.list()['runs']
+    for child in children:m.wait(child['id'],10)
+    output=json.dumps({'outcomes':outcomes,'children':len(children),'request_id':request_id})
 elif 'mode:foreign-control' in task:
     outcomes={}
     for action in ('status','stop'):
@@ -86,7 +113,7 @@ elif 'mode:idempotent' in task:
     m=RunManager();request_id='a'*32
     if 'mode:lost-reply' in task:
         import socket
-        packet={'schema_version':1,'operation':'start','args':['claude-local','mode:leaf'],'kwargs':{'model':'model-b'},'request_id':request_id,'token':os.environ['HARNESSFLEET_PARENT_TOKEN']}
+        packet={'schema_version':1,'operation':'start','args':['claude-local','mode:leaf'],'kwargs':{'model':'model-b','cwd':os.getcwd()},'request_id':request_id,'token':os.environ['HARNESSFLEET_PARENT_TOKEN']}
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
             connection.connect(os.environ['HARNESSFLEET_BROKER']);connection.sendall((json.dumps(packet)+'\n').encode())
             with connection.makefile('rb') as stream:assert stream.readline(100000).endswith(b'\n')
