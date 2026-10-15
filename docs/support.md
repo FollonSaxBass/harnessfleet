@@ -26,8 +26,11 @@ write adds file-editing tools. Claude delegate also enables Bash, which is not O
 containment. Cursor and DSH do not promise read-only enforcement and reject that
 request. Their protocol/configuration remains experimental and needs native evidence.
 
-Native lineage currently accepts explicit normalized-v1 exports. Automatic native
-SQLite/JSONL store discovery and tracing are not qualified. Observation, managed
+Native lineage accepts explicit normalized-v1 exports and an experimental
+`cursor-transcripts-v1` source for one configured project's transcript directory,
+including IDE conversations without a chat store and their immediate native children.
+Cursor observation has synthetic fixture/browser evidence; complete native tracing
+and automatic SQLite/JSONL store discovery are not qualified. Observation, managed
 execution and exact causal lineage are separate. Compact observed ancestry survives
 source loss, with expired completeness. App control requires a future lease backend.
 

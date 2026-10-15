@@ -88,7 +88,9 @@ harnessfleet run recover
 
 The tree expands and paginates without a fixed depth or node cutoff. Filtering
 retains ancestors. Connected source failures and partial branches remain explicit.
-Observed sessions remain read-only. Connect only explicitly selected source exports.
+Observed sessions remain read-only. Connect explicitly selected normalized exports
+or a [Cursor project's transcript directory](docs/configuration.md#cursor-transcript-observation),
+including IDE conversations without a chat store.
 
 [Recovery](docs/recovery.md) explains uncertain ownership, generation fencing,
 continuation and retention. [Plugins](docs/plugins.md) describes the public adapter

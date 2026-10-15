@@ -2,10 +2,11 @@
 
 import argparse
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 from . import __version__, config
-from .contracts import FleetError
+from .contracts import FleetError, error_record
 from .manager import RunManager
 
 
@@ -271,22 +272,22 @@ def main(argv=None):
         return 0
     except FleetError as e:
         print(
-            json.dumps({"schema_version": 1, "error": {"code": e.code, "message": str(e)}}),
+            json.dumps(error_record(e.code, str(e))),
             file=__import__("sys").stderr,
         )
         return 2
     except KeyboardInterrupt:
         return 130
+    except sqlite3.Error:
+        print(
+            json.dumps(error_record("state", "State storage is unavailable; inspect local diagnostics")),
+            file=__import__("sys").stderr,
+        )
+        return 2
     except (OSError, ValueError, TypeError, KeyError):
         print(
             json.dumps(
-                {
-                    "schema_version": 1,
-                    "error": {
-                        "code": "operation",
-                        "message": "Operation failed; inspect local configuration and diagnostics",
-                    },
-                }
+                error_record("operation", "Operation failed; inspect local configuration and diagnostics")
             ),
             file=__import__("sys").stderr,
         )

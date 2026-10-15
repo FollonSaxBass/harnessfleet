@@ -1,12 +1,41 @@
 import json
 import os
 import subprocess
+import sqlite3
+import sys
 from pathlib import Path
 import pytest
 from harnessfleet import FleetError
 from harnessfleet.integration import compatibility, install_skill
 from harnessfleet.config import initialize
 from harnessfleet import processes
+
+
+def test_corrupt_database_returns_contract_error_without_modification(instance):
+    state = instance.path / "corrupt-state"
+    state.mkdir()
+    database = state / "fleet.sqlite3"
+    original = b"synthetic invalid database"
+    database.write_bytes(original)
+    result = instance.cli("--state", str(state), "run", "list", ok=False)
+    assert result.returncode == 2
+    error = json.loads(result.stderr)
+    assert error["schema_version"] == 1 and error["error"]["code"] == "state"
+    assert "Traceback" not in result.stderr
+    assert database.read_bytes() == original
+
+
+def test_locked_database_returns_contract_error(instance):
+    connection = sqlite3.connect(instance.path / "state/fleet.sqlite3")
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        result = instance.cli("run", "list", ok=False)
+    finally:
+        connection.close()
+    assert result.returncode == 2
+    error = json.loads(result.stderr)
+    assert error["schema_version"] == 1 and error["error"]["code"] == "state"
+    assert "Traceback" not in result.stderr
 
 
 def test_doctor_has_no_model_invocations(instance):
@@ -58,6 +87,25 @@ def test_compatibility_never_overwrites_existing_commands(instance, monkeypatch)
     with pytest.raises(FleetError):
         compatibility(instance.path / "new-bin")
     assert command.read_text() == "foreign"
+
+
+def test_compatibility_forwarder_is_executable_under_restrictive_umask(instance):
+    directory = instance.path / "bin"
+    directory.mkdir()
+    executable = Path(sys.executable).parent / "harnessfleet"
+    result = subprocess.run(
+        [str(executable), "integrate", "--compatibility", "--directory", str(directory)],
+        env={**os.environ, "PATH": str(directory)},
+        umask=0o111,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    command = Path(json.loads(result.stdout)["installed"])
+    assert os.access(command, os.X_OK)
+    version = subprocess.run([str(command), "routes"], capture_output=True, text=True, timeout=10)
+    assert version.returncode == 0 and json.loads(version.stdout)["schema_version"] == 1
 
 
 def test_offline_demo_outside_git(instance):

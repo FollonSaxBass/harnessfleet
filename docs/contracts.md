@@ -74,6 +74,18 @@ native reply. Public graph pages do not embed replies. Native observation cannot
 launch or attach execution. HTTP control requires loopback Host, same Origin and a
 session CSRF header. The local API has no CORS and is not a multi-user security boundary.
 
+`cursor-transcripts-v1` is an opt-in observation source for an explicitly configured
+project directory. It produces partial native session/subagent nodes and latest
+observed replies; it does not bind managed generations or grant control. Missing
+or unreadable transcripts and read-budget limits produce explicit issues while
+preserving navigable nodes. See [configuration](configuration.md#cursor-transcript-observation).
+
+`connectors KIND` returns metadata items with redacted string fields: `id` and
+`parent` up to 512 characters, `label` up to 200, and `kind`, `status` and
+`completeness` up to 80. Replies and undeclared fields are excluded. Invalid items
+are omitted with `connector_record` issues and partial completeness. Source files
+retain the existing 16 MiB read limit.
+
 Only the current major contract version is supported. Compatible additions may
 add optional fields; consumers should ignore fields they do not recognize. A breaking
 meaning or field change requires a new contract version. Plugins declare version 1.
