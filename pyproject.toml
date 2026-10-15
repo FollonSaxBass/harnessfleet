@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harnessfleet"
+version = "0.1.0a1"
+description = "Local cross-harness agent delegation with explicit authority and durable lineage"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "HarnessFleet contributors"}]
+classifiers = ["Development Status :: 3 - Alpha", "Operating System :: POSIX :: Linux", "Programming Language :: Python :: 3"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.9", "build>=1.2", "playwright>=1.48"]
+
+[project.scripts]
+harnessfleet = "harnessfleet.cli:main"
+
+[project.entry-points."harnessfleet.adapters"]
+# Third-party distributions register their adapters here.
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harnessfleet"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "docs/", "scripts/", "README.md", "CONTEXT.md", "LICENSE", "NOTICE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

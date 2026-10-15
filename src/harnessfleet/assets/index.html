@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HarnessFleet · Agents & Runs</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><header><span class="brand">HarnessFleet</span><span class="tag">Local instance</span></header>
+<main><div class="heading"><div><p class="eyebrow">COLLABORATION</p><h1>Agents & Runs</h1><p>Execution authority and native callers, in context.</p></div><button id="refresh">Refresh</button></div>
+<div class="toolbar"><label for="filter">Find an agent</label><input id="filter" type="search" placeholder="Search nodes and preserve their ancestors"><span id="health" role="status"></span></div>
+<div id="sources" aria-label="Connected sources"></div><div class="workspace"><section aria-label="Agent tree"><div id="tree" role="tree"></div><p id="empty" hidden>No connected sessions or managed runs. Try <code>harnessfleet demo</code>.</p></section>
+<aside aria-label="Selected agent"><h2 id="selection">Select an agent</h2><p id="details">Expand a branch to explore its available descendants. Observed sessions remain read-only.</p><button id="output" hidden>Read output</button><button id="stop" hidden>Stop run</button><pre id="reply" aria-live="polite"></pre></aside></div></main><footer>Local, single-user orchestration · contract v1</footer></body></html>

@@ -11,6 +11,8 @@ This is an alpha implementation of the [product specification](docs/specificatio
 The [support matrix](docs/support.md) separates deterministic tests, native evidence
 and capabilities that remain disabled. A successful synthetic demo is not native certification.
 
+![Synthetic local dashboard with expandable branches and observed replies](docs/images/dashboard.png)
+
 ## Install and try it
 
 Python 3.11+ is required. Linux/WSL with pidfds is required for execution.
