@@ -1,0 +1,7 @@
+HarnessFleet is an independent extraction of author-owned orchestration ideas
+and Linux process identity helpers from tracked source snapshot
+f86b576d927bfb9f7fea8fcf7a3d67ced574bf8f (2026-10-15).
+No source repository history, uncommitted changes, private configuration,
+knowledge, conversations or runtime registries are included.
+Native CLI products and model services are external prerequisites and retain
+their own licenses and terms. No third-party CLI binary is redistributed.
