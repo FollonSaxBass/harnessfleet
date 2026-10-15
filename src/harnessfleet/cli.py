@@ -108,7 +108,7 @@ def demo(directory=None, serve=False, port=8421):
                 "id": "reviewer",
                 "parent": "parent",
                 "kind": "native_subagent",
-                "label": "Review · Claude Code",
+                "label": "Review · Codex",
                 "status": "done",
                 "reply": "Synthetic review: the example contract is consistent.",
             },
