@@ -44,6 +44,14 @@ plugins can prove account-specific recovery through the versioned contract.
 
 ## Evidence recorded 2026-10-15
 
+The successful native proofs listed below predate the scoped Unix transport.
+They do not certify this candidate's delegation path. Its first real Codex
+workspace-write proof failed with a delegation transport error before child launch;
+model-free sandbox probes reproduce Unix connection denial in both supported
+permission modes. The parent was consumed once and cleanup was confirmed. This is
+an acceptance blocker; Claude-to-Codex and continuation transport qualification
+were not attempted afterward. See [scoped delegation](delegation.md).
+
 - Native versions: Codex CLI 0.162.1 and Claude Code 2.1.299,
   Linux x86_64/WSL, Python 3.12.
 - Real Codex CLI → Claude Code passed through the common skill. The parent launched

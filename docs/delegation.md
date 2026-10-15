@@ -1,5 +1,11 @@
 # Scoped native delegation
 
+This candidate is not ready for native delegation acceptance. A real Codex CLI
+0.162.1 workspace-write parent could not connect to its endpoint and stopped before
+launching a child. Model-free sandbox probes reproduce `EPERM` in read-only and
+workspace-write. No implicit network widening or direct-storage fallback is allowed.
+The deterministic protocol tests below do not qualify that native sandbox path.
+
 Managed host CLI and Python clients select a generation-specific Unix socket before
 opening a registry or loading instance configuration. Native environments receive
 no instance config/state location, and Codex receives no registry writable root.
