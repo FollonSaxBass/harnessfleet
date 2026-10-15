@@ -26,6 +26,17 @@ def test_required_worker_isolation_refuses_unqualified_host_before_effects(insta
     assert not instance.calls() and instance.m.list()["total"] == 0
 
 
+def test_unavailable_transport_does_not_consume_native_invocation(instance, monkeypatch):
+    temporary = instance.path / ("long-socket-directory-" * 6)
+    temporary.mkdir()
+    monkeypatch.setenv("TMPDIR", str(temporary))
+    run = instance.start()
+    result = instance.finish(run)
+    assert result["status"] == "failed"
+    assert not result["invoked"] and not instance.calls()
+    assert result["failure"] == "delegation_transport"
+
+
 @pytest.mark.parametrize("lost_reply", [False, True])
 def test_worker_request_ids_preserve_one_child_without_opening_store(instance, lost_reply):
     parent = instance.start("mode:idempotent" + (" mode:lost-reply" if lost_reply else ""))

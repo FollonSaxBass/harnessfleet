@@ -168,15 +168,14 @@ def supervise(rid, generation):
                 command = adapter.command(command_run, str(directory))
             else:
                 command = adapter.command(run, str(directory))
+                from .delegation import Portal
+
+                portal = Portal(m, rid, generation)
+                native_env.update(portal.environment())
             # Receipt is consumed before Popen; a crash here is ambiguous, never replayable.
             run.update(invoked=True, status="running", updated_at=time.time())
             s.save(c, run, "invocation_consumed")
         # Commit the consumed marker before any native/container effect.
-        if not is_box:
-            from .delegation import Portal
-
-            portal = Portal(m, rid, generation)
-            native_env.update(portal.environment())
         if is_box:
             from .boxes import prepare
 

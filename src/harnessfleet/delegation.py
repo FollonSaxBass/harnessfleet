@@ -196,9 +196,14 @@ class Portal:
                     slots.release()
 
         self.server = Server(self.path, Handler, bind_and_activate=False)
-        self.server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
-        self.server.server_bind()
-        self.server.server_activate()
+        try:
+            self.server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            self.server.server_bind()
+            self.server.server_activate()
+        except OSError:
+            self.server.server_close()
+            self.directory.cleanup()
+            raise FleetError("delegation_transport", "Cannot initialize the managed delegation endpoint")
         self.thread = threading.Thread(
             target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
         )
