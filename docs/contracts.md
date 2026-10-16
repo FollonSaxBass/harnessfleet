@@ -24,7 +24,8 @@ Other methods: `routes(diagnose=False)`, `list(offset=0,limit=50)`, `status(id)`
 `dispatch()`, `recover(id=None)`, `resume(id,assignment,expected_generation=None)`,
 `keep(id,value=True)` and `prune()`.
 
-`start` options include billing, permission, model, cwd, queue, structured selection
+`start` options include `delegation="leaf"|"required"` with `leaf` as default,
+billing, permission, model, cwd, queue, structured selection
 and finite `auto_resume`. An exact target is `{ "route":"R", "model":"M" }`.
 Required sets use `selection.required`; allowed sets use `selection.allowed`.
 An absent or `null` constraint is unspecified; a non-null constraint must be a list
@@ -43,6 +44,11 @@ caller when attributed by the graph, timestamps, `invoked`, `accepted`,
 `cleanup_confirmed`, failure code, quota reset hint, output digest, keep flag and
 remaining automatic cycles. Assignments, grants, credential references and tokens
 are never in public execution records. Native session identifiers are not credentials.
+
+Records also expose `delegation` and the selected `delegation_transport`. Routes
+report configured transport and native qualification separately from executable/login
+readiness. A successful native login does not qualify delegation IPC. Required
+delegation without the separately enabled transport fails before admission.
 
 Statuses are `queued`, `starting`, `running`, `stopping`, `finished`, `failed`,
 `quota`, `authentication`, `stopped`, `cancelled`, `rejected` and `uncertain`.
@@ -94,3 +100,9 @@ retain the existing 16 MiB read limit.
 Only the current major contract version is supported. Compatible additions may
 add optional fields; consumers should ignore fields they do not recognize. A breaking
 meaning or field change requires a new contract version. Plugins declare version 1.
+
+
+Managed host clients use [scoped delegation](delegation.md) with the same CLI and
+Python method names, child visibility and durable mutation request ids. `events`
+is available through both interfaces. Route records declare `execution_boundary`
+separately from adapter capabilities: scoped transport does not certify isolation.

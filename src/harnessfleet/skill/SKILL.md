@@ -10,7 +10,8 @@ Use the installed `harnessfleet` command. Native CLIs and accounts remain extern
 1. From an unmanaged native session, check `harnessfleet service status` first.
    Its controller must already be running from a host terminal before you launch
    agents. A native tool may terminate detached processes when it returns. Managed
-   parents have their own host broker. Do not try to repair lifecycle failures by
+   parents admitted with `--delegation required` have their own host broker. Leaf
+   parents cannot delegate. Do not try to repair lifecycle failures by
    repeating a consumed launch. Run `harnessfleet run routes --diagnose`. Inspect the structured capabilities,
    available Routes, models, billing and platform support. Doctor never invokes models.
 2. Interpret the user's selection. A required model stays required. A required set
@@ -34,6 +35,10 @@ Use the installed `harnessfleet` command. Native CLIs and accounts remain extern
    --selection '{"required":[{"route":"R","model":"M"}]}' "ASSIGNMENT"` for required sets.
    Allowed sets use `--selection '{"allowed":[...]}'`. Inspect every target's result.
    The core validates resolved targets; it does not infer natural-language intent.
+   Starts default to `--delegation leaf`. Request `--delegation required` only when
+   the assignment needs further managed delegation and the separately enabled
+   experimental transport is authorized. Native transport qualification remains
+   incomplete; Codex CLI 0.162.1 sandbox currently blocks the Unix connection.
 6. Await `harnessfleet run follow ID --timeout 120`. This blocks on execution events.
    Keep a long follower in your harness's background tool and await its completion;
    do not repeatedly poll unchanged logs. A timeout leaves the child running.
@@ -55,6 +60,11 @@ An observed native session is read-only and is not an execution grant.
 Codex `read-only` uses its native sandbox. Claude `read-only` exposes Read/Glob/Grep;
 `workspace-write` adds file editing. Claude `delegate` additionally enables Bash,
 which can modify files and run commands without OS containment: request it only
-when the user's grant authorizes it. Codex `workspace-write` allows the configured
-state directory so delegated CLI calls can register their results. Native tool
-restrictions are not general process or network containment.
+when the user's grant authorizes it. Managed host CLI/Python calls use the supplied
+scoped delegation endpoint; do not select another config/state or access the registry
+directly. Only this active parent generation's children are available. Global service,
+retention, dispatch and recovery belong to host administration. A transport error
+includes its request id: reuse only that id with `--request-id ID`; never resubmit an
+uncertain mutation under a new id. Endpoint failure never permits direct-storage
+fallback. Scoped delegation and native tool restrictions do not establish cross-worker,
+process or network containment.

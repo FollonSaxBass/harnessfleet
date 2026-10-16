@@ -16,6 +16,9 @@ _Avoid_: Native session as a synonym.
 **Generation**: One bounded invocation or continuation belonging to an Agent Run.
 _Avoid_: A new Agent Run for every follow-up.
 
+**Leaf run**: A managed Agent Run without authority to originate further managed delegation.
+_Avoid_: Treating observation or inherited project access as delegation permission.
+
 **Grant**: Preauthorized delegation authority and its finite limits, inherited or narrowed by descendants.
 _Avoid_: Visibility as authorization.
 
@@ -36,3 +39,10 @@ _Avoid_: Assuming an observed session is available for execution.
 
 **Receipt**: Evidence bound to one invocation generation and its verified outcome.
 _Avoid_: Treating a missing receipt as permission to repeat a consumed request.
+
+
+**Delegation capability**: Authority to request child operations under one active parent generation.
+_Avoid_: Host administration or proof of worker isolation.
+
+**Worker isolation**: Enforced separation preventing a native worker from accessing another run's private state and control processes.
+_Avoid_: A scoped delegation capability as a synonym.

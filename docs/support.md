@@ -25,8 +25,11 @@ Codex uses its native sandbox. Claude read-only exposes only Read/Glob/Grep; wor
 write adds file-editing tools. Claude delegate also enables Bash, which is not OS
 containment. Cursor and DSH do not promise read-only enforcement and reject that
 request. Their protocol/configuration remains experimental and needs native evidence.
-Native workers must be trusted with their instance's shared registry. Workspace-write
-state access can expose other run tokens and permit state tampering; see the
+Native starts default to leaf execution without delegation capability. Required
+delegation uses a separately enabled, unqualified experimental Unix interface
+without a registry write grant. Missing transport configuration means disabled.
+Same-UID host access remains trusted and can expose other run tokens or
+permit state tampering outside that interface; see the
 [state trust boundary](recovery.md) and [remaining work](remaining-work.md).
 
 Native lineage accepts explicit normalized-v1 exports and an experimental
@@ -42,6 +45,14 @@ account billing probe or provider-specific quota recovery is certified. Public a
 plugins can prove account-specific recovery through the versioned contract.
 
 ## Evidence recorded 2026-10-15
+
+The successful native proofs listed below predate the scoped Unix transport.
+They do not certify this candidate's delegation path. Its first real Codex
+workspace-write proof failed with a delegation transport error before child launch;
+model-free sandbox probes reproduce Unix connection denial in both supported
+permission modes. The parent was consumed once and cleanup was confirmed. This is
+an acceptance blocker; Claude-to-Codex and continuation transport qualification
+were not attempted afterward. See [scoped delegation](delegation.md).
 
 - Native versions: Codex CLI 0.162.1 and Claude Code 2.1.299,
   Linux x86_64/WSL, Python 3.12.

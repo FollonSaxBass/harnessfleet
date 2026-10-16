@@ -230,10 +230,18 @@ def test_read_only_grant_cannot_delegate_writes(instance):
 
 
 @pytest.mark.parametrize("permission", ["read-only", "workspace-write"])
-def test_codex_state_write_access_is_preserved_on_continuation(instance, permission):
+def test_codex_continuation_uses_broker_without_state_write_roots(instance, permission):
     run = json.loads(
         instance.cli(
-            "run", "start", "--route", "codex-local", "--permission", permission, "assignment"
+            "run",
+            "start",
+            "--route",
+            "codex-local",
+            "--permission",
+            permission,
+            "--delegation",
+            "required",
+            "assignment",
         ).stdout
     )
     instance.finish(run)
@@ -243,14 +251,9 @@ def test_codex_state_write_access_is_preserved_on_continuation(instance, permiss
     assert len(calls) == 2 and "resume" in calls[1]["args"]
     for call in calls:
         roots = [arg for arg in call["args"] if arg.startswith("sandbox_workspace_write.writable_roots=")]
-        if permission == "workspace-write":
-            if "--add-dir" in call["args"] and "resume" not in call["args"]:
-                assert call["args"][call["args"].index("--add-dir") + 1] == str(instance.path / "state")
-                continue
-            assert len(roots) == 1
-            assert json.loads(roots[0].split("=", 1)[1]) == [str(instance.path / "state")]
-        else:
-            assert not roots
+        assert not roots and "--add-dir" not in call["args"]
+        assert call["broker_present"]
+        assert not call["state_path_present"] and not call["config_path_present"]
 
 
 def test_managed_recursive_delegation(instance):

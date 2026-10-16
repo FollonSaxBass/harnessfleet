@@ -66,6 +66,32 @@ def alive(record):
         return True  # unreadable ownership never proves exit
 
 
+def descendant(pid, root):
+    try:
+        if not root or receipt(root["pid"]) != root or root.get("birth") is None:
+            return False
+        fd = pidfd_open(pid)
+        peer = receipt(pid)
+        try:
+            seen = set()
+            current = pid
+            while current > 1 and current not in seen and len(seen) < 256:
+                if current == root["pid"]:
+                    return (
+                        peer.get("birth") is not None
+                        and receipt(pid) == peer
+                        and receipt(root["pid"]) == root
+                    )
+                seen.add(current)
+                fields = Path(f"/proc/{current}/stat").read_text().rsplit(") ", 1)[1].split()
+                current = int(fields[1])
+            return False
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def terminate(run, include_supervisor=False):
     marker = f"HARNESSFLEET_EXECUTION={run['id']}:{run['generation']}:{run['execution_token']}".encode()
     deadline = time.monotonic() + 3

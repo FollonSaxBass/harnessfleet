@@ -116,6 +116,7 @@ def supervise(rid, generation):
     raw = []
     failure = None
     native_env = {}
+    portal = None
     stderr_chunks = []
     try:
         directory = s.directory(rid, generation)
@@ -125,7 +126,7 @@ def supervise(rid, generation):
                 return 2
             run["supervisor"] = processes.receipt(os.getpid())
             run["pgid"] = os.getpgrp()
-            route, adapter = m._validate(run, m.configuration(), dispatch=True)
+            route, adapter = m._validate(run, m.configuration(), c, dispatch=True)
             is_box = run["environment"].startswith("box:")
             readiness = {"available": True} if is_box else adapter.diagnose(route)
             if not readiness.get("available"):
@@ -134,20 +135,32 @@ def supervise(rid, generation):
             native_env.update(
                 HARNESSFLEET_PARENT_RUN=rid,
                 HARNESSFLEET_PARENT_GENERATION=str(generation),
-                HARNESSFLEET_PARENT_TOKEN=run["child_token"],
                 HARNESSFLEET_EXECUTION=marker,
-                HARNESSFLEET_STATE=str(s.root),
-                HARNESSFLEET_CONFIG=str(m.config_path),
                 AGENT_IDENTITY=run["identity"],
             )
+            for key in (
+                "HARNESSFLEET_CONFIG",
+                "HARNESSFLEET_STATE",
+                "HARNESSFLEET_SERVICE_TOKEN",
+                "HARNESSFLEET_BROKER",
+                "HARNESSFLEET_BROKER_OWNER",
+                "HARNESSFLEET_PARENT_TOKEN",
+            ):
+                native_env.pop(key, None)
             # The skill is a bounded explicit reference, not a parent conversation export.
             from importlib.resources import files
 
+            delegates = run.get("delegation", "leaf") == "required"
             skill = str(files("harnessfleet").joinpath("skill/SKILL.md"))
             run["assignment"] = (
                 f"Execution identity: {run['identity']}. "
-                f"For permitted delegation read the common skill at {skill}. "
-                "Never change billing or substitute an explicitly requested target.\n\n" + run["assignment"]
+                + (
+                    f"For permitted delegation read the common skill at {skill}. "
+                    if delegates
+                    else "This is a leaf run. Managed delegation is unavailable. "
+                )
+                + "Never change billing or substitute an explicitly requested target.\n\n"
+                + run["assignment"]
             )
             if is_box:
                 # Box accounts, config and executable paths belong to the image.
@@ -161,11 +174,11 @@ def supervise(rid, generation):
                 command = adapter.command(command_run, str(directory))
             else:
                 command = adapter.command(run, str(directory))
-            if run["harness"] == "codex_cli" and run["permission"] == "workspace-write" and not is_box:
-                command[-2:-2] = [
-                    "-c",
-                    "sandbox_workspace_write.writable_roots=" + json.dumps([str(s.root)]),
-                ]
+                from .delegation import Portal
+
+                if delegates:
+                    portal = Portal(m, rid, generation)
+                    native_env.update(portal.environment(), HARNESSFLEET_PARENT_TOKEN=run["child_token"])
             # Receipt is consumed before Popen; a crash here is ambiguous, never replayable.
             run.update(invoked=True, status="running", updated_at=time.time())
             s.save(c, run, "invocation_consumed")
@@ -203,6 +216,8 @@ def supervise(rid, generation):
                 close_fds=True,
             )
             current["native_process"] = processes.receipt(process.pid)
+            if portal is not None:
+                portal.bind_native(current["native_process"])
             s.save(c, current, "native_created")
         broker = threading.Thread(target=serve_children, args=(m, rid, generation, stopped), daemon=True)
         broker.start()
@@ -244,6 +259,8 @@ def supervise(rid, generation):
         failure = e.code if isinstance(e, FleetError) else "execution"
     finally:
         stopped.set()
+        if portal is not None:
+            portal.close()
         # Child exit does not prove descendant cleanup. Keep capacity on uncertainty.
         current = s.get(rid)
         if current["generation"] != generation:

@@ -55,6 +55,8 @@ def parser():
     start.add_argument("--queue", action="store_true")
     start.add_argument("--selection", type=json.loads)
     start.add_argument("--auto-resume", type=int, default=0)
+    start.add_argument("--request-id")
+    start.add_argument("--delegation", choices=("leaf", "required"), default="leaf")
     many = r.add_parser("batch")
     many.add_argument("assignment")
     many.add_argument("--targets", type=json.loads, required=True)
@@ -63,11 +65,16 @@ def parser():
     many.add_argument("--billing", default="subscription", choices=("subscription", "metered"))
     many.add_argument("--permission", default="read-only")
     many.add_argument("--queue", action="store_true")
+    many.add_argument("--request-id")
+    many.add_argument("--delegation", choices=("leaf", "required"), default="leaf")
     li = r.add_parser("list")
     li.add_argument("--offset", type=int, default=0)
     li.add_argument("--limit", type=int, default=50)
     for action in ("status", "stop", "cancel", "keep"):
-        r.add_parser(action).add_argument("id")
+        action_parser = r.add_parser(action)
+        action_parser.add_argument("id")
+        if action in ("stop", "cancel"):
+            action_parser.add_argument("--request-id")
     follow = r.add_parser("follow")
     follow.add_argument("id")
     follow.add_argument("--timeout", type=float)
@@ -82,6 +89,7 @@ def parser():
     resume.add_argument("id")
     resume.add_argument("assignment")
     resume.add_argument("--expected-generation", type=int)
+    resume.add_argument("--request-id")
     attach = r.add_parser("attach")
     attach.add_argument("--route", required=True)
     attach.add_argument("--conversation", required=True)
@@ -157,6 +165,14 @@ def demo(directory=None, serve=False, port=8421):
 
 
 def execute(args):
+    from .delegation import managed_environment
+
+    managed = managed_environment()
+    if managed and args.command != "run":
+        raise FleetError("delegation_scope", "Worker clients can use only scoped run commands")
+    request = {"request_id": args.request_id} if getattr(args, "request_id", None) else {}
+    if request and not managed:
+        raise FleetError("request", "Request ids require a managed delegation client")
     if args.command == "init":
         return {"schema_version": 1, "config": config.initialize(args.config)}
     if args.command == "demo":
@@ -219,6 +235,8 @@ def execute(args):
             queue=args.queue,
             selection=args.selection,
             auto_resume=args.auto_resume,
+            delegation=args.delegation,
+            **request,
         )
     if action == "batch":
         return m.start_many(
@@ -229,11 +247,13 @@ def execute(args):
             billing=args.billing,
             permission=args.permission,
             queue=args.queue,
+            delegation=args.delegation,
+            **request,
         )
     if action == "list":
         return m.list(args.offset, args.limit)
     if action in ("status", "stop", "cancel", "keep"):
-        return getattr(m, action)(args.id)
+        return getattr(m, action)(args.id, **request)
     if action == "follow":
         return m.wait(args.id, args.timeout)
     if action == "output":
@@ -243,9 +263,9 @@ def execute(args):
         data["text"] = redact(data["text"])
         return data
     if action == "events":
-        return {"schema_version": 1, "events": m.store.events(args.id, args.after)}
+        return m.events(args.id, args.after)
     if action == "resume":
-        return m.resume(args.id, args.assignment, expected_generation=args.expected_generation)
+        return m.resume(args.id, args.assignment, expected_generation=args.expected_generation, **request)
     if action == "attach":
         raise FleetError(
             "unsupported",

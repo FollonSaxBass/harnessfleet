@@ -1,0 +1,242 @@
+import json
+import socket
+import sqlite3
+import struct
+import time
+
+import pytest
+from harnessfleet import FleetError, processes
+
+
+def test_missing_transport_opt_in_refuses_required_delegation_before_admission(instance):
+    instance.config["policy"].pop("delegation_transport", None)
+    instance.save()
+    result = instance.cli(
+        "run", "start", "--route", "codex-local", "--delegation", "required", "task", ok=False
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stderr)["error"]["code"] == "delegation_transport"
+    assert instance.m.list()["total"] == 0 and not instance.calls()
+
+
+def test_leaf_run_has_no_capability_and_cannot_open_store_or_delegate(instance):
+    instance.config["policy"].pop("delegation_transport", None)
+    instance.save()
+    parent = json.loads(
+        instance.cli(
+            "run", "start", "--route", "codex-local", "--delegation", "leaf", "mode:leaf-context"
+        ).stdout
+    )
+    assert instance.finish(parent)["status"] == "finished"
+    outcome = json.loads(instance.m.output(parent["id"])["text"])
+    assert outcome == {
+        "broker": False,
+        "token": False,
+        "result": "delegation_transport",
+        "skill_instruction": False,
+    }
+    assert instance.m.list()["total"] == 1 and len(instance.calls()) == 1
+
+
+def test_disabling_transport_revalidates_queued_work_and_resume(instance):
+    active = instance.start("mode:slow")
+    queued = instance.start(queue=True)
+    instance.m.stop(active["id"])
+    completed = instance.m.start("claude-local", "mode:leaf", delegation="required")
+    assert instance.finish(completed)["status"] == "finished"
+    before = len(instance.calls())
+    instance.config["policy"]["delegation_transport"] = "disabled"
+    instance.save()
+    dispatch = instance.m.dispatch()
+    assert not dispatch["dispatched"]
+    rejected = instance.m.status(queued["id"])
+    assert rejected["status"] == "rejected" and not rejected["invoked"]
+    assert rejected["failure"] == "delegation_transport"
+    with pytest.raises(FleetError) as error:
+        instance.m.resume(completed["id"], "follow-up")
+    assert error.value.code == "delegation_transport"
+    assert instance.m.status(completed["id"])["generation"] == 1
+    assert len(instance.calls()) == before
+
+
+@pytest.mark.parametrize("scope", ["policy", "route"])
+def test_disabling_transport_revokes_new_children_from_an_existing_parent(instance, scope):
+    watch = processes.Changes(instance.path)
+    try:
+        parent = instance.start("mode:recursive mode:slow")
+        deadline = time.monotonic() + 5
+        while not instance.calls():
+            assert time.monotonic() < deadline
+            watch.wait(1)
+        authority = instance.config["policy"] if scope == "policy" else instance.config["routes"][0]
+        authority["delegation_transport"] = "disabled"
+        instance.save()
+        assert instance.finish(parent)["status"] == "finished"
+        assert "delegation_transport" in instance.m.output(parent["id"])["text"]
+        assert instance.m.list()["total"] == 1 and len(instance.calls()) == 1
+    finally:
+        watch.close()
+
+
+@pytest.mark.parametrize("operation", ["queued", "resume"])
+def test_parent_route_revocation_revalidates_existing_children(instance, monkeypatch, operation):
+    ready = instance.path / "child-ready"
+    release = instance.path / "continue-child"
+    monkeypatch.setenv("HF_TEST_CHILD_READY", str(ready))
+    monkeypatch.setenv("HF_TEST_CHILD_RELEASE", str(release))
+    victim = instance.m.start("claude-local", "mode:slow") if operation == "queued" else None
+    watch = processes.Changes(instance.path)
+    try:
+        parent = instance.start("mode:held-child action:" + operation)
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            assert time.monotonic() < deadline
+            watch.wait(1)
+        instance.config["routes"][0]["delegation_transport"] = "disabled"
+        instance.save()
+        if victim:
+            instance.m.stop(victim["id"])
+            assert not instance.m.dispatch()["dispatched"]
+        else:
+            release.write_text("continue")
+        assert instance.finish(parent)["status"] == "finished"
+        assert "delegation_transport" in instance.m.output(parent["id"])["text"]
+        children = [r for r in instance.m.list()["runs"] if r.get("parent_run") == parent["id"]]
+        assert len(children) == 1 and children[0]["generation"] == 1
+        assert children[0]["status"] == ("rejected" if operation == "queued" else "finished")
+    finally:
+        watch.close()
+
+
+def test_native_delegation_cannot_observe_or_stop_an_unrelated_run(instance, monkeypatch):
+    victim = instance.m.start("claude-local", "mode:slow")
+    monkeypatch.setenv("HF_TEST_VICTIM", victim["id"])
+    attacker = instance.start("mode:foreign-control")
+    assert instance.finish(attacker)["status"] == "finished"
+    outcomes = json.loads(instance.m.output(attacker["id"])["text"])
+    assert outcomes == {"status": "delegation_scope", "stop": "delegation_scope"}
+    assert instance.m.status(victim["id"])["status"] in ("starting", "running")
+
+
+def test_required_worker_isolation_refuses_unqualified_host_before_effects(instance):
+    instance.config["policy"]["worker_isolation"] = "isolated"
+    instance.save()
+    with pytest.raises(FleetError) as error:
+        instance.start()
+    assert error.value.code == "isolation"
+    assert not instance.calls() and instance.m.list()["total"] == 0
+
+
+def test_unavailable_transport_does_not_consume_native_invocation(instance, monkeypatch):
+    temporary = instance.path / ("long-socket-directory-" * 6)
+    temporary.mkdir()
+    monkeypatch.setenv("TMPDIR", str(temporary))
+    run = instance.start()
+    result = instance.finish(run)
+    assert result["status"] == "failed"
+    assert not result["invoked"] and not instance.calls()
+    assert result["failure"] == "delegation_transport"
+
+
+@pytest.mark.parametrize(
+    "binding,operation", [("cli", "start"), ("cli", "batch"), ("python", "start"), ("python", "batch")]
+)
+@pytest.mark.parametrize("cwd", ["omitted", "relative"])
+def test_delegated_directory_resolves_at_the_native_caller(instance, binding, operation, cwd):
+    project = instance.path / "project"
+    caller = project / "caller"
+    (caller / "relative").mkdir(parents=True)
+    run = instance.start(f"mode:caller-cwd binding:{binding} operation:{operation} cwd:{cwd}", cwd=project)
+    assert instance.finish(run)["status"] == "finished"
+    assert instance.m.output(run["id"])["text"] == str(caller if cwd == "omitted" else caller / "relative")
+
+
+def test_receipt_commit_failure_exposes_request_id_without_replaying_child(instance):
+    with sqlite3.connect(instance.m.store.db) as c:
+        c.execute("""CREATE TRIGGER fail_delegation_receipt BEFORE UPDATE ON meta
+            WHEN NEW.key LIKE 'delegation:%' BEGIN SELECT RAISE(FAIL, 'synthetic unavailable receipt'); END""")
+    parent = instance.start("mode:receipt-failure")
+    assert instance.finish(parent)["status"] == "finished"
+    result = json.loads(instance.m.output(parent["id"])["text"])
+    assert result["children"] == 1 and len(instance.calls()) == 2
+    assert all(
+        row["code"] == "request_uncertain" and result["request_id"] in row["message"]
+        for row in result["outcomes"]
+    )
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_worker_request_ids_preserve_one_child_without_opening_store(instance, lost_reply):
+    parent = instance.start("mode:idempotent" + (" mode:lost-reply" if lost_reply else ""))
+    assert instance.finish(parent)["status"] == "finished"
+    result = json.loads(instance.m.output(parent["id"])["text"])
+    assert result["ids"][0] == result["ids"][1]
+    assert result["verified"] and result["children"] == 1
+    assert result["conflict"] == "request_conflict"
+    assert len(instance.calls()) == 2
+
+
+@pytest.mark.parametrize(
+    "task,code", [("mode:cleared-parent", "permission"), ("mode:missing-broker", "delegation_transport")]
+)
+def test_worker_context_cannot_fall_back_to_root_admission(instance, task, code):
+    parent = instance.start(task)
+    assert instance.finish(parent)["status"] == "finished"
+    assert instance.m.output(parent["id"])["text"] == code
+    assert instance.m.list()["total"] == 1 and len(instance.calls()) == 1
+
+
+def test_copied_worker_credentials_do_not_authorize_a_host_sibling(instance, monkeypatch):
+    witness = instance.path / "capability.json"
+    monkeypatch.setenv("HF_TEST_CAPABILITY_WITNESS", str(witness))
+    watch = processes.Changes(instance.path)
+    try:
+        parent = instance.start("mode:capability mode:slow")
+        deadline = time.monotonic() + 5
+        while not witness.exists():
+            assert time.monotonic() < deadline
+            watch.wait(1)
+        credentials = json.loads(witness.read_text())
+        with monkeypatch.context() as copied:
+            for key, value in credentials.items():
+                copied.setenv(key, value)
+            result = instance.cli("run", "list", ok=False)
+        assert result.returncode == 2
+        assert json.loads(result.stderr)["error"]["code"] == "delegation_auth"
+        assert instance.m.status(parent["id"])["status"] == "running"
+        assert len(instance.calls()) == 1
+    finally:
+        watch.close()
+
+
+def test_transferred_connection_checks_actual_message_writer(instance, monkeypatch):
+    witness = instance.path / "capability.json"
+    monkeypatch.setenv("HF_TEST_CAPABILITY_WITNESS", str(witness))
+    path = str(instance.path / "handoff.sock")
+    monkeypatch.setenv("HF_TEST_HANDOFF", path)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as handoff:
+        handoff.bind(path)
+        handoff.listen()
+        handoff.settimeout(5)
+        instance.start("mode:capability mode:handoff mode:slow")
+        connection, _ = handoff.accept()
+        with connection:
+            _, controls, _, _ = connection.recvmsg(1, socket.CMSG_SPACE(4))
+        level, kind, value = controls[0]
+        assert level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS
+        fd = struct.unpack("i", value)[0]
+        credentials = json.loads(witness.read_text())
+        with socket.socket(fileno=fd) as transferred:
+            transferred.settimeout(5)
+            packet = {
+                "schema_version": 1,
+                "operation": "routes",
+                "args": [],
+                "kwargs": {},
+                "token": credentials["HARNESSFLEET_PARENT_TOKEN"],
+            }
+            transferred.sendall((json.dumps(packet) + "\n").encode())
+            with transferred.makefile("rb") as stream:
+                response = json.loads(stream.readline(100000))
+        assert response["error"]["code"] == "delegation_auth"
+        assert len(instance.calls()) == 1

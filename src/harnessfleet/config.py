@@ -37,6 +37,8 @@ def defaults():
             "max_invocations": 20,
             "cwd_roots": [],
             "experimental": False,
+            "worker_isolation": "trusted",
+            "delegation_transport": "disabled",
         },
         "sources": [],
         "projects": [],
@@ -78,7 +80,11 @@ def load(path=None):
                 raise ValueError()
             if type(r.get("concurrency", 1)) is not int or r.get("concurrency", 1) < 1:
                 raise ValueError()
+            if r.get("delegation_transport", "disabled") not in ("disabled", "experimental-unix-v1"):
+                raise ValueError()
         p = data["policy"]
+        if p.get("delegation_transport", "disabled") not in ("disabled", "experimental-unix-v1"):
+            raise ValueError()
         for key in ("max_depth", "max_parallel", "max_invocations"):
             if type(p[key]) is not int or p[key] < 1:
                 raise ValueError()
