@@ -129,10 +129,18 @@ class _Server:
         self.initialized = False
         self.ready = False
         self.shutdown_requested = False
+        self.wakeup_read, self.wakeup_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
         self.out = sys.stdout.fileno()
         os.set_blocking(self.out, False)
         for _ in range(2):
             threading.Thread(target=self.worker, daemon=True).start()
+
+    def request_shutdown(self):
+        self.shutdown_requested = True
+        try:
+            os.write(self.wakeup_write, b"x")
+        except OSError:
+            pass
 
     def write(self, packet):
         payload = (_json(packet) + "\n").encode()
@@ -356,7 +364,11 @@ class _Server:
                     break
                 if partial_since is not None and time.monotonic() - partial_since >= DEADLINE:
                     break
-                if not select.select([fd], [], [], 0.1)[0]:
+                ready = select.select([fd, self.wakeup_read], [], [], 0.1)[0]
+                if self.shutdown_requested:
+                    eof = True
+                    break
+                if fd not in ready:
                     continue
                 chunk = os.read(fd, min(65536, MAX_REQUEST + 1 - len(buffer)))
                 if not chunk:
@@ -434,12 +446,14 @@ def serve():
         return 2
     try:
         server = _Server(registration["cwd"])
-        previous = signal.signal(signal.SIGTERM, lambda *_: setattr(server, "shutdown_requested", True))
+        previous = signal.signal(signal.SIGTERM, lambda *_: server.request_shutdown())
         try:
             result = server.run()
             return result if result else (0 if _retire() else 2)
         finally:
             signal.signal(signal.SIGTERM, previous)
+            os.close(server.wakeup_read)
+            os.close(server.wakeup_write)
     except Exception:
         os.write(2, b"Managed stdio transport retired\n")
         return 2
