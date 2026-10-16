@@ -148,6 +148,7 @@ def supervise(rid, generation):
     native_env = {}
     portal = None
     progress = None
+    progress_flushed = False
     lines = None
     stderr_chunks = []
     try:
@@ -329,10 +330,13 @@ def supervise(rid, generation):
             failure = result.failure
         if not failure:
             progress.finish()
+            progress_flushed = True
     except (Exception, KeyboardInterrupt) as e:
         failure = e.code if isinstance(e, FleetError) else "execution"
     finally:
         stopped.set()
+        if not progress_flushed and failure is None:
+            failure = "execution"
         if lines is not None:
             lines.close()
         if progress is not None:
@@ -365,7 +369,12 @@ def supervise(rid, generation):
             if current["generation"] != generation or current["status"] not in ACTIVE:
                 return 2
             accepted = bool(
-                not failure and clean and result.completed and result.output and result.session_id
+                not failure
+                and clean
+                and progress_flushed
+                and result.completed
+                and result.output
+                and result.session_id
             )
             state = (
                 "finished" if accepted else (failure if failure in ("quota", "authentication") else "failed")
