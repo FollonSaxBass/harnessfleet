@@ -93,3 +93,16 @@ A broader certified v0.1 still requires qualified app attachment/continuation
 backends, native Linux amd64 container execution, provider-specific DSH and Cursor
 evidence, native source tracing and expanded crash/ownership qualification. Do not replace an existing workspace deployment with this
 alpha. Later platform combinations qualify separately.
+
+
+Claude's native top-level spend-limit refusal is classified as quota when its
+structured assistant error fields identify `rate_limit` / `usage_limit_reached`
+and HTTP 429. A matching initialized session is required. The following error
+result is never accepted as final output, even when its subtype says success.
+Only a finite, valid seconds timestamp from that envelope's rejected `seven_day`
+`rate_limit_info.resetsAt` is exposed as the reset. Missing, malformed or differently
+scoped reset information remains unknown. Text, nested subagent errors and
+`overageResetsAt` do not establish that reset. Classification does not enable
+automatic quota recovery, change accounts or replay an invocation. This envelope
+was observed on Claude Code 2.1.300; regression qualification uses synthetic native
+executables and does not certify current real-account quota availability.

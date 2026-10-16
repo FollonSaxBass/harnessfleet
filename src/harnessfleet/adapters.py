@@ -1,5 +1,6 @@
 """Native protocol boundaries and public entry-point discovery."""
 
+import datetime as dt
 import json
 import os
 import shutil
@@ -223,6 +224,13 @@ class Claude(Base):
         if event.get("type") == "assistant":
             if event.get("error") == "authentication_failed":
                 result.failure = "authentication"
+            elif (
+                _claude_quota_event(event)
+                and result.session_id
+                and event.get("session_id") == result.session_id
+            ):
+                result.failure = "quota"
+                result.reset_at = _claude_quota_reset(event)
             text = "\n".join(
                 b.get("text", "")
                 for b in event.get("message", {}).get("content", [])
@@ -405,3 +413,34 @@ def classify(event, result: Result):
                 result.reset_at = reset
         elif code in ("unauthorized", "authentication_error", "invalid_api_key"):
             result.failure = "authentication"
+
+
+def _claude_quota_event(event):
+    return (
+        isinstance(event, dict)
+        and event.get("type") == "assistant"
+        and event.get("parent_tool_use_id") is None
+        and event.get("is_api_error_message") is True
+        and event.get("error") == "rate_limit"
+        and event.get("api_error") == "usage_limit_reached"
+        and event.get("api_error_status") == 429
+    )
+
+
+def _claude_quota_reset(event):
+    params = event.get("api_error_params")
+    info = params.get("rate_limit_info") if isinstance(params, dict) else None
+    if (
+        not isinstance(info, dict)
+        or info.get("status") != "rejected"
+        or info.get("rateLimitType") != "seven_day"
+    ):
+        return None
+    stamp = info.get("resetsAt")
+    if type(stamp) not in (int, float) or stamp <= 0:
+        return None
+    try:
+        dt.datetime.fromtimestamp(stamp, dt.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return stamp
