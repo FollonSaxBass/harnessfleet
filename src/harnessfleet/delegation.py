@@ -30,6 +30,7 @@ MAX_REQUEST = 1024 * 1024
 MAX_RESPONSE = 32 * 1024 * 1024
 OPERATIONS = {
     "bridge_register",
+    "bridge_retire",
     "routes",
     "start",
     "start_many",
@@ -178,6 +179,8 @@ class Portal:
         self.bridge_instance = bridge_instance
         self.bridge_receipt = self.bridge_handle = self.bridge_monitor = None
         self.bridge_lock = threading.Lock()
+        self.bridge_retiring = threading.Event()
+        self.native_completed = threading.Event()
         self.closed = False
         self.resources = ExitStack()
         self.failure_fd = None
@@ -193,7 +196,7 @@ class Portal:
                 self.request.settimeout(5)
                 try:
                     packet, writer = receive(self.request)
-                    response = portal.respond(packet, writer)
+                    response = portal.respond(packet, writer, disconnect_fd=self.request.fileno())
                 except FleetError as error:
                     response = error_record(error.code, str(error))
                 except Exception:
@@ -326,17 +329,17 @@ class Portal:
             },
         }
 
-    def respond(self, packet, writer):
+    def respond(self, packet, writer, *, disconnect_fd=None):
         try:
             handle = processes.pidfd_open(writer[0])
         except OSError:
             raise FleetError("delegation_auth", "Requesting process is no longer available")
         try:
-            return self._respond(packet, writer, handle)
+            return self._respond(packet, writer, handle, disconnect_fd)
         finally:
             os.close(handle)
 
-    def _respond(self, packet, writer, handle):
+    def _respond(self, packet, writer, handle, disconnect_fd):
         if not isinstance(packet, dict) or packet.get("schema_version") != 1:
             raise FleetError("request", "Unsupported delegation request")
         with self.manager.store.transaction() as c:
@@ -350,6 +353,25 @@ class Portal:
         ):
             raise FleetError("delegation_auth", "Delegation capability is invalid or obsolete")
         pid, uid, _ = writer
+        if packet.get("operation") == "bridge_retire":
+            if (
+                not self.bridge_instance
+                or uid != os.getuid()
+                or self.bridge_receipt != processes.receipt(pid)
+                or self.bridge_handle is None
+                or select.select([handle, self.bridge_handle], [], [], 0)[0]
+                or packet.get("args") != []
+                or packet.get("kwargs") != {}
+            ):
+                raise FleetError("delegation_auth", "Bridge retirement is not attributable")
+            # Retirement only narrows authority. The pinned helper may acknowledge
+            # shutdown after native exit without gaining execution authority.
+            with self.manager.store.transaction() as c:
+                current = self.manager.store.get(self.rid, c)
+                if current["generation"] != self.generation or current["status"] != "running":
+                    raise FleetError("generation", "Bridge retirement was fenced")
+                self.bridge_retiring.set()
+            return {"schema_version": 1, "result": {"completed": self.native_completed.wait(5)}}
         if (
             uid != os.getuid()
             or self.native_handle is None
@@ -364,6 +386,7 @@ class Portal:
             try:
                 return (
                     not self.closed
+                    and not self.bridge_retiring.is_set()
                     and self.native_handle is not None
                     and not select.select([handle, self.native_handle], [], [], 0)[0]
                     and processes.receipt(pid) == peer
@@ -394,6 +417,7 @@ class Portal:
         ):
             raise FleetError("delegation_auth", "Only the registered bridge may use this generation")
         manager = copy.copy(self.manager)
+        manager._wait_disconnect = disconnect_fd
         manager._principal = {
             "id": self.rid,
             "generation": self.generation,

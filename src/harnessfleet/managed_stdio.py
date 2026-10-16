@@ -232,6 +232,11 @@ class _Server:
         if not isinstance(params, dict):
             self.rpc_error(rid, -32602, "Invalid params")
             return
+        if "_meta" in params:
+            if not isinstance(params["_meta"], dict):
+                self.rpc_error(rid, -32602, "Invalid request metadata")
+                return
+            params = {key: value for key, value in params.items() if key != "_meta"}
         if method == "notifications/cancelled" and not has_id:
             if set(params) <= {"requestId", "reason"} and type(params.get("requestId")) in (str, int):
                 with self.lock:
@@ -271,7 +276,7 @@ class _Server:
             self.write({"jsonrpc": "2.0", "id": rid, "result": {}})
         elif not self.ready:
             self.rpc_error(rid, -32600, "MCP initialization required")
-        elif method == "tools/list" and not params:
+        elif method == "tools/list" and set(params) <= {"cursor"} and params.get("cursor") is None:
             self.write({"jsonrpc": "2.0", "id": rid, "result": {"tools": [TOOL]}})
         elif method == "tools/call":
             self.admit(rid, params)
@@ -383,6 +388,26 @@ class _Server:
         return 0 if eof and not buffer else 2
 
 
+def _retire():
+    replies = queue.Queue(maxsize=1)
+    cancelled = threading.Event()
+
+    def request():
+        try:
+            replies.put(Client(cancelled=cancelled).bridge_retire())
+        except Exception:
+            replies.put(None)
+
+    threading.Thread(target=request, daemon=True).start()
+    try:
+        reply = replies.get(timeout=DEADLINE)
+        return isinstance(reply, dict) and reply.get("completed") is True
+    except queue.Empty:
+        return False
+    finally:
+        cancelled.set()
+
+
 def serve():
     """Serve MCP on stdin/stdout; invalid managed startup never opens local state."""
     try:
@@ -403,7 +428,8 @@ def serve():
         os.write(2, b"Managed stdio startup rejected\n")
         return 2
     try:
-        return _Server(registration["cwd"]).run()
+        result = _Server(registration["cwd"]).run()
+        return result if result else (0 if _retire() else 2)
     except Exception:
         os.write(2, b"Managed stdio transport retired\n")
         return 2

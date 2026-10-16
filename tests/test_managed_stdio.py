@@ -34,6 +34,11 @@ class Client:
         return dict(schema_version=1, cwd="/recorded/parent", bridge_instance=instance,
                     run=os.environ["HARNESSFLEET_PARENT_RUN"], generation=3)
 
+    def bridge_retire(self):
+        if os.environ.get("HF_PROTO_RETIRE_WAIT"):
+            time.sleep(60)
+        return {"completed": True}
+
     def __getattr__(self, operation):
         def call(**kwargs):
             behavior = kwargs.pop("behavior", None)
@@ -418,3 +423,27 @@ def test_batch_limit_and_selection_forwarding(launch):
     assert len(result["targets"]) == 128
     assert result["selection"] == selection
     assert result["cwd"] == "/recorded/parent"
+
+
+def test_native_request_metadata_is_not_execution_arguments(launch):
+    wire = launch()
+    wire.initialize()
+    reply = wire.request("tools/list", {"_meta": {"progressToken": "synthetic"}, "cursor": None})
+    assert [tool["name"] for tool in reply["result"]["tools"]] == ["run"]
+    reply = wire.request(
+        "tools/call",
+        {
+            "name": "run",
+            "arguments": {"operation": "status", "arguments": {}},
+            "_meta": {"progressToken": "synthetic"},
+        },
+    )
+    assert envelope(reply)["result"] == {"operation": "status", "arguments": {}}
+    assert wire.request("tools/list", {"_meta": "invalid"})["error"]["code"] == -32602
+
+
+def test_eof_retirement_has_a_bounded_deadline(launch):
+    wire = launch({"HF_PROTO_RETIRE_WAIT": "1"})
+    wire.initialize()
+    wire.process.stdin.close()
+    assert wire.process.wait(timeout=7) == 2

@@ -27,6 +27,7 @@ def redact(text, env=None):
 
 def native_lines(process, stderr_chunks, portal=None, completed=None):
     """Read bounded protocol/stderr streams until the native pidfd signals exit."""
+    import select
     import selectors
 
     monitor = selectors.DefaultSelector()
@@ -44,9 +45,20 @@ def native_lines(process, stderr_chunks, portal=None, completed=None):
     error_size = 0
     exited = False
     open_streams = {output_fd, error_fd}
+
+    def check_bridge():
+        if (
+            portal is not None
+            and portal.failure_fd is not None
+            and not completed()
+            and select.select([portal.failure_fd], [], [], 0)[0]
+        ):
+            raise FleetError("delegation_transport", "Managed stdio helper exited; it will not be restarted")
+
     try:
         while True:
             events = monitor.select()
+            check_bridge()
             exited = exited or any(key.data == "exit" for key, _ in events)
             for fd in list(open_streams):
                 while True:
@@ -69,16 +81,15 @@ def native_lines(process, stderr_chunks, portal=None, completed=None):
                         raise FleetError("protocol", "Native line exceeded bounded limits")
                     while b"\n" in pending:
                         line, pending = pending.split(b"\n", 1)
+                        check_bridge()
                         yield line + b"\n"
             for key, _ in events:
                 if key.data == "bridge_failure":
                     monitor.unregister(key.fd)
-                    if not exited and not completed():
-                        raise FleetError(
-                            "delegation_transport", "Managed stdio helper exited; it will not be restarted"
-                        )
+                    check_bridge()
             if exited:
                 if pending:
+                    check_bridge()
                     yield pending
                 return
     finally:
@@ -290,6 +301,8 @@ def supervise(rid, generation):
             if not isinstance(event, dict):
                 raise FleetError("protocol", "Native event is not an object")
             adapter.consume(event, result)
+            if portal is not None and result.completed:
+                portal.native_completed.set()
             if len(result.output.encode()) > MAX_ARTIFACT:
                 raise FleetError("protocol", "Native final output exceeds the bounded limit")
             with s.transaction() as c:

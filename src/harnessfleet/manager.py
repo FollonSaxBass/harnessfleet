@@ -559,6 +559,8 @@ class RunManager:
         }
 
     def wait(self, rid, timeout=None):
+        import select
+
         processes.require_linux()
         watch = processes.Changes(self.store.root)
         deadline = time.monotonic() + timeout if timeout is not None else None
@@ -570,7 +572,15 @@ class RunManager:
                 left = deadline - time.monotonic() if deadline else 30
                 if left <= 0:
                     raise FleetError("timeout", "Wait timed out; execution continues")
-                watch.wait(min(left, 30))
+                peer = getattr(self, "_wait_disconnect", None)
+                if peer is None:
+                    watch.wait(min(left, 30))
+                else:
+                    ready = select.select([watch.fd, peer], [], [], min(left, 30))[0]
+                    if peer in ready:
+                        raise FleetError("cancelled", "Follower disconnected; child execution is unchanged")
+                    if watch.fd in ready:
+                        watch.wait(0)
                 # Lost supervisors are reconciled without replay; no unchanged log polling.
                 if run["status"] in ("running", "starting") and time.time() - run["updated_at"] > 2:
                     self.recover(rid)
