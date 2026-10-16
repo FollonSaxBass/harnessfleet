@@ -280,22 +280,26 @@ class Portal:
         self.directory.cleanup()
         self.resources.close()
 
-    def _register_bridge(self, parent, writer, kwargs):
+    def _register_bridge(self, parent, peer, kwargs, live):
         if not self.bridge_instance or kwargs != {"instance": self.bridge_instance}:
             raise FleetError("delegation_auth", "Bridge instance is not authorized")
         with self.bridge_lock:
             if self.closed or self.native_handle is None or select.select([self.native_handle], [], [], 0)[0]:
                 raise FleetError("delegation_auth", "Native invocation no longer accepts a bridge")
-            record = processes.receipt(writer[0])
+            record = peer
+            if not live():
+                raise FleetError("delegation_auth", "Bridge process is no longer attributable")
             if self.bridge_receipt is not None and self.bridge_receipt != record:
                 raise FleetError("delegation_auth", "Bridge replacement requires a new generation")
             if self.bridge_receipt is None:
-                handle = processes.pidfd_open(writer[0])
+                handle = processes.pidfd_open(record["pid"])
                 try:
                     with self.manager.store.transaction() as c:
                         current = self.manager.store.get(self.rid, c)
                         if current["generation"] != self.generation or current["status"] != "running":
                             raise FleetError("generation", "Bridge registration was fenced")
+                        if not live() or select.select([handle], [], [], 0)[0]:
+                            raise FleetError("delegation_auth", "Bridge process changed during registration")
                         current["bridge_process"] = record
                         current.setdefault("owned_processes", []).append(record)
                         self.manager.store.save(c, current, "bridge_registered")
@@ -382,7 +386,7 @@ class Portal:
         if operation == "bridge_register":
             if args:
                 raise FleetError("request", "Invalid bridge registration")
-            return self._register_bridge(parent, writer, kwargs)
+            return self._register_bridge(parent, peer, kwargs, live)
         if self.bridge_instance and (
             self.bridge_receipt != peer
             or self.bridge_handle is None

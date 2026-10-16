@@ -110,6 +110,21 @@ def terminate(run, include_supervisor=False):
         uncertain = False
         changed = False
         try:
+            for record in run.get("owned_processes", []):
+                fd = None
+                try:
+                    fd = pidfd_open(record["pid"])
+                    if receipt(record["pid"]) == record and record.get("birth") is not None:
+                        if not select.select([fd], [], [], 0)[0]:
+                            descriptors.append(fd)
+                            fd = None
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                except PermissionError:
+                    uncertain = True
+                finally:
+                    if fd is not None:
+                        os.close(fd)
             for p in Path("/proc").iterdir():
                 if not p.name.isdecimal():
                     continue

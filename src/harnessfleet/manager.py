@@ -782,6 +782,7 @@ class RunManager:
                 native_process=None,
                 bridge_process=None,
                 bridge_instance=None,
+                owned_processes=[],
                 requesting_actor=copy.deepcopy(self._principal.get("actor")) if self._principal else None,
                 spawn_claim=False,
                 box_receipt=None,
