@@ -25,6 +25,12 @@ retaining the marker are included. A process that scrubs both its marker and gro
 cannot be proven by this backend; arbitrary daemon containment is outside the
 backend's contract. Native tool restrictions are not OS containment.
 
+The optional stdio helper also has a generation-specific registered process receipt.
+Cleanup uses that exact PID/start identity even if the helper detaches or scrubs its
+marker. A reused identity is never signaled, and unreadable ownership retains
+uncertainty. Helper exit before native completion fails required delegation without
+restarting it. Existing children keep their own lifecycle and receipts.
+
 `run stop ID` fences new child admission before enumerating descendants and cleans
 up only demonstrably owned processes. Unknown cleanup remains `uncertain` with
 capacity retained. `run recover` checks lost controllers and local evidence. It

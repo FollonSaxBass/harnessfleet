@@ -9,8 +9,9 @@ import sys
 import time
 
 import pytest
+from harnessfleet import managed_stdio
 
-SOURCE = Path(__file__).resolve().parents[1] / "src"
+SOURCE = Path(managed_stdio.__file__).resolve().parents[1]
 DRIVER = r"""
 import json
 import os
