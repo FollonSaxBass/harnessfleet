@@ -244,7 +244,6 @@ class Claude(Base):
             final_session = event.get("session_id", result.session_id)
             if result.session_id and final_session != result.session_id:
                 raise FleetError("protocol", "Native completion session changed")
-            result.session_id = final_session
             if not result.completed:
                 result.failure = result.failure or "execution"
                 message = str(event.get("result", ""))

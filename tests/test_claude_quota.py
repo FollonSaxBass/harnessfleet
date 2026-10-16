@@ -26,15 +26,47 @@ def envelope():
         ({}, "quota", RESET),
         ({"api_error_params": {}}, "quota", None),
         ({"api_error_params": []}, "quota", None),
-        ({"api_error_params": {"rate_limit_info": {"status": "rejected", "resetsAt": True}}}, "quota", None),
         (
-            {"api_error_params": {"rate_limit_info": {"status": "rejected", "resetsAt": float("inf")}}},
+            {
+                "api_error_params": {
+                    "rate_limit_info": {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": True}
+                }
+            },
             "quota",
             None,
         ),
-        ({"api_error_params": {"rate_limit_info": {"status": "allowed", "resetsAt": RESET}}}, "quota", None),
         (
-            {"api_error_params": {"rate_limit_info": {"status": "rejected", "overageResetsAt": RESET}}},
+            {
+                "api_error_params": {
+                    "rate_limit_info": {
+                        "status": "rejected",
+                        "rateLimitType": "seven_day",
+                        "resetsAt": float("inf"),
+                    }
+                }
+            },
+            "quota",
+            None,
+        ),
+        (
+            {
+                "api_error_params": {
+                    "rate_limit_info": {"status": "allowed", "rateLimitType": "seven_day", "resetsAt": RESET}
+                }
+            },
+            "quota",
+            None,
+        ),
+        (
+            {
+                "api_error_params": {
+                    "rate_limit_info": {
+                        "status": "rejected",
+                        "rateLimitType": "seven_day",
+                        "overageResetsAt": RESET,
+                    }
+                }
+            },
             "quota",
             None,
         ),
@@ -60,6 +92,20 @@ def envelope():
             "quota",
             None,
         ),
+        (
+            {
+                "api_error_params": {
+                    "rate_limit_info": {
+                        "status": "rejected",
+                        "rateLimitType": "seven_day",
+                        "resetsAt": float("nan"),
+                    }
+                }
+            },
+            "quota",
+            None,
+        ),
+        ({"fixture_before_init": True}, "failed", None),
         ({"session_id": "22222222-2222-4222-8222-222222222222"}, "failed", None),
         ({"error": "authentication_failed"}, "authentication", None),
         ({"fixture_exit": 1}, "quota", RESET),
@@ -87,12 +133,19 @@ def test_native_quota_envelope_cli_preserves_failure_and_no_replay(instance, cha
 if 'mode:claude-telemetry' in task:
     event=json.loads({json.dumps(event)!r})
     event.setdefault('session_id',session)
+    if event.get('fixture_before_init'):
+        emit({{'type':'result','subtype':'error_during_execution','is_error':True,'session_id':session}})
     emit(event)
     failed=bool(event.get('error')) and not event.get('parent_tool_use_id')
     emit({{'type':'result','subtype':'success','is_error':failed,'session_id':session,'result':'synthetic final'}})
     raise SystemExit(event.get('fixture_exit',0))
 """
     source = binary.read_text()
+    if event.get("fixture_before_init"):
+        initial = next(
+            line for line in source.splitlines() if line.startswith("emit({'type':'system','subtype':'init'")
+        )
+        source = source.replace(initial + "\n", "", 1)
     source = source.replace("if 'mode:capability' in task:", fixture + "\nif 'mode:capability' in task:", 1)
     binary.write_text(source)
     run = json.loads(instance.cli("run", "start", "--route", "claude-local", "mode:claude-telemetry").stdout)
