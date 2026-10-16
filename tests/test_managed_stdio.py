@@ -41,6 +41,8 @@ class Client:
                 while not self.cancelled.is_set():
                     time.sleep(0.001)
             raise FleetError("cancelled", "Registration response cancelled")
+        if os.environ.get("HF_PROTO_REGISTER_RETURN_SIGNAL"):
+            os.kill(os.getpid(), 15)
         return dict(schema_version=1, cwd="/recorded/parent", bridge_instance=instance,
                     run=os.environ["HARNESSFLEET_PARENT_RUN"], generation=3)
 
@@ -76,6 +78,12 @@ class Client:
             return dict(operation=operation, arguments=kwargs)
         return call
 helper.Client = Client
+if os.environ.get("HF_PROTO_SERVER_INIT_SIGNAL"):
+    original_init = helper._Server.__init__
+    def interrupted_init(server, cwd):
+        original_init(server, cwd)
+        os.kill(os.getpid(), 15)
+    helper._Server.__init__ = interrupted_init
 if os.environ.get("HF_PROTO_BLOCK_SIGTERM"):
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
 if os.environ.get("HF_PROTO_SHUTDOWN_FRAME") or os.environ.get("HF_PROTO_NOTIFY_FRAME"):
@@ -126,6 +134,7 @@ class Wire:
             dict(protocolVersion=version, capabilities={}, clientInfo=dict(name="fixture", version="1")),
         )
         self.send(dict(jsonrpc="2.0", method="notifications/initialized"))
+        assert "result" in self.request("tools/list")
         return result
 
     def call(self, operation="status", arguments=None, rid=2, request_id=None):
@@ -533,3 +542,10 @@ def test_sigterm_during_registration_retires_without_default_signal_exit(launch)
     wire.process.send_signal(signal.SIGTERM)
     assert wire.process.wait(timeout=1) == 2
     assert b"fixture retirement\n" in wire.process.stderr.read()
+
+
+@pytest.mark.parametrize("phase", ["REGISTER_RETURN", "SERVER_INIT"])
+def test_cancelled_startup_never_succeeds_after_valid_registration(launch, phase):
+    wire = launch({"HF_PROTO_" + phase + "_SIGNAL": "1"})
+    assert wire.process.wait(timeout=1) == 2
+    assert wire.process.stdout.read() == b""

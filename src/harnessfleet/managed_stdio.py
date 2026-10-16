@@ -465,6 +465,8 @@ def serve():
             registration = Client(cancelled=shutdown).bridge_register(
                 instance=os.environ["HARNESSFLEET_BRIDGE_INSTANCE"]
             )
+            if shutdown.is_set():
+                raise ValueError()
             if (
                 not isinstance(registration, dict)
                 or registration.get("schema_version") != 1
@@ -486,7 +488,10 @@ def serve():
             if shutdown.is_set():
                 server.request_shutdown()
             result = server.run()
-            return result if result else (0 if _retire() else 2)
+            if result:
+                return result
+            completed = _retire()
+            return 0 if completed and (server.ready or not shutdown.is_set()) else 2
         except Exception:
             os.write(2, b"Managed stdio transport retired\n")
             return 2
