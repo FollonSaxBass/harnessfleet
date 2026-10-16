@@ -337,3 +337,40 @@ def test_compat_syscall_abi_is_rejected_by_kernel_filter(kernel_boundary):
     finally:
         assert handle.terminate(5).cleanup_confirmed
         handle.close()
+
+
+def test_identity_read_error_does_not_leak_untransferred_launcher_pidfd(kernel_boundary, monkeypatch):
+    original = processes.receipt
+    observed = set()
+
+    def target_pidfds(pid):
+        result = set()
+        for item in Path("/proc/self/fdinfo").iterdir():
+            try:
+                if f"Pid:\t{pid}\n" in item.read_text():
+                    result.add(int(item.name))
+            except FileNotFoundError:
+                continue
+        return result
+
+    def unreadable(pid):
+        pinned = target_pidfds(pid)
+        if pid != os.getpid() and pinned:
+            observed.update(pinned)
+            raise PermissionError("synthetic identity access denial after pidfd open")
+        return original(pid)
+
+    monkeypatch.setattr(processes, "receipt", unreadable)
+    with pytest.raises(FleetError) as caught:
+        launch(LaunchSpec(("/usr/bin/echo", "must-not-execute"), runtime_root="/usr"))
+    handle = caught.value.handle
+    try:
+        assert observed
+        assert not target_pidfds(handle.process.pid)
+    finally:
+        monkeypatch.setattr(processes, "receipt", original)
+        handle.reconcile_startup(5)
+        assert handle.terminate(5).cleanup_confirmed
+        handle.close()
+        for descriptor in observed & target_pidfds(handle.process.pid):
+            os.close(descriptor)

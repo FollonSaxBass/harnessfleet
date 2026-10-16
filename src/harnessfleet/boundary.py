@@ -168,14 +168,18 @@ class ExecutionHandle:
         if self.launcher is None:
             self.launcher = processes.receipt(self.process.pid)
         descriptor = processes.pidfd_open(self.process.pid)
-        if (
-            not self.launcher["birth"]
-            or processes.receipt(self.process.pid) != self.launcher
-            or select.select([descriptor], [], [], 0)[0]
-        ):
-            os.close(descriptor)
-            raise FleetError("boundary_identity", "Launcher identity could not be pinned")
-        self.launcher_fd = descriptor
+        try:
+            if (
+                not self.launcher["birth"]
+                or processes.receipt(self.process.pid) != self.launcher
+                or select.select([descriptor], [], [], 0)[0]
+            ):
+                raise FleetError("boundary_identity", "Launcher identity could not be pinned")
+            self.launcher_fd = descriptor
+            descriptor = None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def reconcile_startup(self, timeout):
         """Pin the original blocked launch after an ownership-read failure; never release it."""
