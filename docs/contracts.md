@@ -106,3 +106,22 @@ Managed host clients use [scoped delegation](delegation.md) with the same CLI an
 Python method names, child visibility and durable mutation request ids. `events`
 is available through both interfaces. Route records declare `execution_boundary`
 separately from adapter capabilities: scoped transport does not certify isolation.
+
+## Managed stdio binding
+
+`harnessfleet managed-stdio` is a capability-only optional binding of execution v1.
+It accepts no instance configuration or state override, never opens Store and
+requires supervisor-issued context. Helper stdout contains bounded MCP messages;
+startup refusal writes only a fixed stderr diagnostic and exits 2.
+
+Its `run` tool uses `{operation, arguments, request_id?}`. `arguments` are the same
+public RunManager keyword arguments; `follow` maps to `wait`. Mutations require a
+caller-supplied 32-hex ID before dispatch. JSON-RPC IDs correlate protocol messages
+and do not authorize replay. A tool response contains the v1 result/error envelope
+as JSON text, with `isError` on failure. No arbitrary argv or shell executor exists.
+
+An additive public run field `requesting_actor` is null or contains bridge kind,
+opaque instance `id`, originating `run` and `generation`, `exact_native_caller: null`
+and `completeness: "partial"`. Raw process identities and capabilities stay private.
+This metadata does not create an exact-native-caller causal edge. Historical
+versions retain their generation-specific attribution across continuation.

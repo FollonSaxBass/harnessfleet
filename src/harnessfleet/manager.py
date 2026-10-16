@@ -32,6 +32,7 @@ PUBLIC = (
     "parent_generation",
     "depth",
     "caller",
+    "requesting_actor",
     "session_id",
     "created_at",
     "updated_at",
@@ -120,7 +121,9 @@ class RunManager:
                 "delegation_reason": "Transport disabled; select explicit experimental transport to test"
                 if transport == "disabled"
                 else (
-                    "Codex CLI 0.162.1 native sandbox connectivity is blocked"
+                    "Owned stdio helper requires separate native launch and account qualification"
+                    if transport == "experimental-stdio-mcp-v1"
+                    else "Codex CLI 0.162.1 native Unix sandbox connectivity is blocked"
                     if route["harness"] == "codex_cli"
                     else "Experimental transport has no native qualification"
                 ),
@@ -197,8 +200,9 @@ class RunManager:
             parent_route = self._route(parent["route_id"], cfg)
             if parent_route.get(
                 "delegation_transport", cfg["policy"].get("delegation_transport", "disabled")
-            ) != "experimental-unix-v1" or any(
-                g.get("delegation_transport", "disabled") != "experimental-unix-v1"
+            ) != parent.get("delegation_transport") or any(
+                parent.get("delegation_transport") not in config.authorized_transports(g)
+                or parent.get("delegation_transport") not in config.TRANSPORTS - {"disabled"}
                 or not g.get("experimental")
                 for g in grants
             ):
@@ -210,11 +214,11 @@ class RunManager:
                 "delegation_transport", cfg["policy"].get("delegation_transport", "disabled")
             )
             if (
-                transport != "experimental-unix-v1"
+                transport not in config.TRANSPORTS - {"disabled"}
                 or run.get("delegation_transport") != transport
                 or route.get("environment", "host") != "host"
                 or any(
-                    g.get("delegation_transport", "disabled") != transport or not g.get("experimental")
+                    transport not in config.authorized_transports(g) or not g.get("experimental")
                     for g in grants
                 )
             ):
@@ -222,6 +226,8 @@ class RunManager:
                     "delegation_transport",
                     "Required delegation transport is disabled or unavailable; no fallback was made",
                 )
+            if transport == "experimental-stdio-mcp-v1" and route["harness"] != "codex_cli":
+                raise FleetError("delegation_transport", "Managed stdio is experimental for host Codex only")
         if run["model"] not in route.get("models", []):
             raise FleetError(
                 "model", "Requested model is unavailable on this Route; no substitution was made"
@@ -262,6 +268,8 @@ class RunManager:
             raise FleetError("parent", "Parent generation is inactive or authority is invalid")
         if str(parent["generation"]) != str(authority["generation"]):
             raise FleetError("parent", "Parent generation is obsolete")
+        if self._principal and not self._principal.get("live", lambda: True)():
+            raise FleetError("parent", "Native requesting process is no longer attributable")
         return parent
 
     def _resource(self, run, c):
@@ -369,6 +377,7 @@ class RunManager:
                 root_run=parent["root_run"] if parent else rid,
                 depth=parent["depth"] + 1 if parent else 1,
                 caller=None,
+                requesting_actor=copy.deepcopy(self._principal.get("actor")) if self._principal else None,
                 grant=grant,
                 created_at=stamp,
                 updated_at=stamp,
@@ -378,7 +387,7 @@ class RunManager:
                 kept=False,
                 auto_remaining=auto_resume,
                 execution_token=secrets.token_hex(24),
-                child_token=secrets.token_hex(24),
+                child_token=secrets.token_hex(32),
                 invocation_count=0,
             )
             run["identity"] = f"{run['harness']}:{run['environment']}:{run['account']}:{run['model']}"
@@ -768,9 +777,12 @@ class RunManager:
                 invoked=False,
                 cleanup_confirmed=False,
                 execution_token=secrets.token_hex(24),
-                child_token=secrets.token_hex(24),
+                child_token=secrets.token_hex(32),
                 supervisor=None,
                 native_process=None,
+                bridge_process=None,
+                bridge_instance=None,
+                requesting_actor=copy.deepcopy(self._principal.get("actor")) if self._principal else None,
                 spawn_claim=False,
                 box_receipt=None,
                 output_sha256=None,

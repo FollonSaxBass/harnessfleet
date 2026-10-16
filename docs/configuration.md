@@ -206,3 +206,20 @@ billing/account combination without native qualification.
 `policy.worker_isolation` defaults to `trusted`, including older configurations
 that omit it. A Route may also declare a requirement. Any non-trusted requirement
 is currently refused before admission; scoped delegation does not qualify OS isolation.
+
+### Authorizing optional delegation interfaces
+
+The default `policy.delegation_transport` is `disabled`. A Route may select an exact
+transport independently; selection never means fallback. Host Codex may explicitly
+select `experimental-stdio-mcp-v1`; `experimental-unix-v1` remains separately gated.
+Both current policy and inherited grant require `experimental: true`.
+
+Without `delegation_transports`, a grant authorizes only its selected
+`delegation_transport`, preserving earlier behavior. An explicit array such as
+`["experimental-unix-v1", "experimental-stdio-mcp-v1"]` authorizes both interfaces;
+an empty array revokes both. Descendants inherit that authorization. The parent's
+originating interface and a child's selected interface are checked independently.
+Changing a Route or revoking an interface is revalidated before further effects.
+
+This is trusted-worker authorization. It does not provide filesystem, process or
+network containment against hostile workers sharing the operator's OS identity.

@@ -25,7 +25,7 @@ def redact(text, env=None):
     return re.sub(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b", "[redacted]", value)
 
 
-def native_lines(process, stderr_chunks):
+def native_lines(process, stderr_chunks, portal=None, completed=None):
     """Read bounded protocol/stderr streams until the native pidfd signals exit."""
     import selectors
 
@@ -38,6 +38,8 @@ def native_lines(process, stderr_chunks):
     monitor.register(output_fd, selectors.EVENT_READ, "output")
     monitor.register(error_fd, selectors.EVENT_READ, "stderr")
     monitor.register(death, selectors.EVENT_READ, "exit")
+    if portal is not None and portal.failure_fd is not None:
+        monitor.register(portal.failure_fd, selectors.EVENT_READ, "bridge_failure")
     pending = b""
     error_size = 0
     exited = False
@@ -68,6 +70,11 @@ def native_lines(process, stderr_chunks):
                     while b"\n" in pending:
                         line, pending = pending.split(b"\n", 1)
                         yield line + b"\n"
+            for key, _ in events:
+                if key.data == "bridge_failure":
+                    monitor.unregister(key.fd)
+                    if not exited and not completed():
+                        raise FleetError("delegation_transport", "Managed stdio helper exited; it will not be restarted")
             if exited:
                 if pending:
                     yield pending
@@ -145,6 +152,7 @@ def supervise(rid, generation):
                 "HARNESSFLEET_BROKER",
                 "HARNESSFLEET_BROKER_OWNER",
                 "HARNESSFLEET_PARENT_TOKEN",
+                "HARNESSFLEET_BRIDGE_INSTANCE",
             ):
                 native_env.pop(key, None)
             # The skill is a bounded explicit reference, not a parent conversation export.
@@ -156,6 +164,7 @@ def supervise(rid, generation):
                 f"Execution identity: {run['identity']}. "
                 + (
                     f"For permitted delegation read the common skill at {skill}. "
+                    f"Selected delegation transport: {run['delegation_transport']}. "
                     if delegates
                     else "This is a leaf run. Managed delegation is unavailable. "
                 )
@@ -173,12 +182,40 @@ def supervise(rid, generation):
                 }
                 command = adapter.command(command_run, str(directory))
             else:
-                command = adapter.command(run, str(directory))
                 from .delegation import Portal
 
                 if delegates:
-                    portal = Portal(m, rid, generation)
-                    native_env.update(portal.environment(), HARNESSFLEET_PARENT_TOKEN=run["child_token"])
+                    stdio = run.get("delegation_transport") == "experimental-stdio-mcp-v1"
+                    if stdio:
+                        import uuid
+
+                        run["bridge_instance"] = uuid.uuid4().hex
+                    portal = Portal(m, rid, generation, bridge_instance=run.get("bridge_instance") if stdio else None)
+                    if stdio:
+                        from pathlib import Path
+
+                        launcher = Path(__file__).with_name("managed_stdio.py").resolve()
+                        if not launcher.is_file():
+                            raise FleetError("delegation_transport", "Installed managed stdio helper is unavailable")
+                        home = Path(portal.directory.name) / "home"
+                        home.mkdir(mode=0o700)
+                        bridge_env = {
+                            **portal.environment(), "HOME": str(home), "XDG_CONFIG_HOME": str(home),
+                            "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                            "HARNESSFLEET_PARENT_RUN": rid, "HARNESSFLEET_PARENT_GENERATION": str(generation),
+                            "HARNESSFLEET_PARENT_TOKEN": run["child_token"],
+                            "HARNESSFLEET_BRIDGE_INSTANCE": run["bridge_instance"],
+                            "HARNESSFLEET_EXECUTION": marker,
+                        }
+                        run["_mcp_servers"] = {"harnessfleet": {
+                            "command": sys.executable, "args": ["-I", str(launcher)], "cwd": run["cwd"],
+                            "env": bridge_env, "env_vars": [], "required": True, "enabled_tools": ["run"],
+                            "default_tools_approval_mode": "approve", "tool_timeout_sec": 130,
+                        }}
+                    else:
+                        native_env.update(portal.environment(), HARNESSFLEET_PARENT_TOKEN=run["child_token"])
+                command = adapter.command(run, str(directory))
+                run.pop("_mcp_servers", None)
             # Receipt is consumed before Popen; a crash here is ambiguous, never replayable.
             run.update(invoked=True, status="running", updated_at=time.time())
             s.save(c, run, "invocation_consumed")
@@ -222,7 +259,7 @@ def supervise(rid, generation):
         broker = threading.Thread(target=serve_children, args=(m, rid, generation, stopped), daemon=True)
         broker.start()
         size = 0
-        for line in native_lines(process, stderr_chunks):
+        for line in native_lines(process, stderr_chunks, portal, lambda: result.completed):
             size += len(line)
             if len(line) > 1024 * 1024 or size > 16 * 1024 * 1024:
                 raise FleetError("protocol", "Native event stream exceeded bounded limits")
@@ -251,9 +288,11 @@ def supervise(rid, generation):
                     {"type": str(event.get("type", event.get("event", "unknown")))[:80]},
                 )
         code = process.wait()
+        if portal is not None and portal.bridge_instance and portal.bridge_receipt is None:
+            failure = "delegation_transport"
         if code or not result.completed or not result.output.strip() or not result.session_id:
             failure = result.failure or "no_final_output"
-        else:
+        elif not failure:
             failure = result.failure
     except (Exception, KeyboardInterrupt) as e:
         failure = e.code if isinstance(e, FleetError) else "execution"
@@ -272,12 +311,13 @@ def supervise(rid, generation):
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 clean = False
+        secrets_env = {**native_env, "HARNESSFLEET_PARENT_TOKEN": run["child_token"]}
         if stderr_chunks:
-            s.write_artifact(rid, generation, "stderr.txt", redact("".join(stderr_chunks), native_env))
+            s.write_artifact(rid, generation, "stderr.txt", redact("".join(stderr_chunks), secrets_env))
         if raw:
-            s.write_artifact(rid, generation, "events.jsonl", redact("".join(raw), native_env))
+            s.write_artifact(rid, generation, "events.jsonl", redact("".join(raw), secrets_env))
         if result.output:
-            s.write_artifact(rid, generation, "partial.txt", redact(result.output, native_env))
+            s.write_artifact(rid, generation, "partial.txt", redact(result.output, secrets_env))
         with s.transaction() as c:
             current = s.get(rid, c)
             if current["generation"] != generation or current["status"] not in ACTIVE:
@@ -295,7 +335,7 @@ def supervise(rid, generation):
                 state = "uncertain"
                 accepted = False
             if accepted:
-                output = redact(result.output, native_env)
+                output = redact(result.output, secrets_env)
                 s.write_artifact(rid, generation, "output.txt", output)
                 current["output_sha256"] = hashlib.sha256(output.encode()).hexdigest()
             current.update(
