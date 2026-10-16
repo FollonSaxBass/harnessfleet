@@ -20,6 +20,7 @@ def parser():
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("doctor")
+    sub.add_parser("managed-stdio", help="Capability-only optional native stdio bridge")
     d = sub.add_parser("demo")
     d.add_argument("--directory")
     d.add_argument("--serve", action="store_true")
@@ -282,6 +283,15 @@ def execute(args):
 def main(argv=None):
     try:
         args = parser().parse_args(argv)
+        if args.command == "managed-stdio":
+            import sys
+
+            if args.config is not None or args.state is not None:
+                sys.stderr.write("Managed stdio cannot select instance storage\n")
+                return 2
+            from .managed_stdio import serve
+
+            return serve()
         result = execute(args)
         if result is not None:
             print(json.dumps(result, ensure_ascii=False))

@@ -58,3 +58,51 @@ administration. See the [trust boundary](recovery.md) and [backlog](remaining-wo
 `policy.worker_isolation` defaults to `trusted`, including older configurations. A
 Route may also require a mode. Any non-trusted requirement is refused before
 admission; no isolated backend or secure unmanaged-caller enrollment is qualified.
+
+## Optional managed stdio bridge
+
+`experimental-stdio-mcp-v1` is a separate experimental selection for host Codex.
+It never activates after a Unix failure. Disabled and leaf defaults remain unchanged.
+Native configuration includes only HarnessFleet's owned stdio server for this mode;
+MCP is not a global requirement or an administrative interface.
+
+A supervisor creates generation-specific helper facts and a private empty home.
+The native CLI receives an absolute isolated Python launcher, an explicit environment
+allowlist and approval for the dedicated server's `run` tool. Global approval and
+sandbox settings stay unchanged. The helper receives no native authentication,
+controller token, instance configuration path or registry path. Its backend is the
+same versioned managed client. A read-only parent's grant still permits only
+read-only children, even though the helper runs outside the native tool sandbox.
+
+The helper registers once. Core pins its kernel-authenticated process and native
+ancestry, fences obsolete generations and rejects replacement helpers. Helper loss
+before native completion fails the required-delegation run. Existing children retain
+their own lifecycle. Unknown cleanup retains capacity.
+
+EOF and native `SIGTERM` request a graceful shutdown. The helper cancels waiters
+and core fences further admissions, then acknowledges observed completion while
+the pinned helper is still alive. Explicit shutdown discards unfinished input and
+stops further buffered dispatch. It interrupts blocked response writes. The
+retirement acknowledgement wait is bounded to five seconds. Native clients can
+impose a shorter process shutdown interval; compatibility requires native tests.
+Abrupt
+death is checked directly through its pidfd, including delayed watcher notifications;
+buffered final output cannot override it. Cancellation also releases the broker's
+waiter slot without cancelling the child.
+
+The MCP `run` tool accepts `operation`, keyword `arguments` and a caller-retained
+32-hex `request_id` for every mutation. Supported operations are Route discovery,
+start/batch, scoped list/status/events/follow/output and child cancel/stop/resume.
+Native diagnostic subprocesses and host administration are excluded. Followers are
+bounded to 120 seconds; cancellation ends a waiter, not an admitted child. Keep the
+same mutation ID to reconcile uncertainty. No transport automatically retries work.
+
+A public `requesting_actor` describes the bridge's opaque instance, originating run
+and generation. Its `exact_native_caller` is null and completeness is partial.
+The bridge is not an exact native subagent or a shell writer. Authority and managed
+parent edges remain distinct from connected-source causal attribution.
+
+This integration remains experimental. Synthetic native startup/call evidence does
+not certify real-account recovery, hostile same-UID isolation, native Boxes, other
+harnesses or platforms. Each claimed continuation and installed-package path needs
+its own qualification. The published alpha and workspace deployment are separate.

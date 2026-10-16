@@ -68,3 +68,18 @@ includes its request id: reuse only that id with `--request-id ID`; never resubm
 uncertain mutation under a new id. Endpoint failure never permits direct-storage
 fallback. Scoped delegation and native tool restrictions do not establish cross-worker,
 process or network containment.
+
+## Explicit stdio interface
+
+If the assignment selects `experimental-stdio-mcp-v1`, use the owned HarnessFleet
+MCP `run` tool for delegation. Its operations implement the same execution contract
+as the installed CLI: `routes`, `start`, `start_many`, `list`, `status`, `events`,
+`follow`, `output`, `cancel`, `stop`, `resume`. Supply public RunManager keyword names
+in `arguments`. Resolve omitted and relative child directories from the parent's
+recorded cwd. Preserve all explicit targets, billing and permission constraints.
+
+Create and retain a distinct 32-hex `request_id` before every mutation. Uncertainty
+requires inspection or reconciliation with that same ID and content. A timeout or
+cancelled follower leaves admitted work running. The bridge represents this managed
+invocation; its exact native subagent caller is unknown. Bridge failure does not
+authorize shell repair, direct registry access, transport fallback or a new-ID retry.

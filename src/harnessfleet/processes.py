@@ -67,29 +67,37 @@ def alive(record):
 
 
 def descendant(pid, root):
+    handles = []
     try:
-        if not root or receipt(root["pid"]) != root or root.get("birth") is None:
+        if not root or root.get("birth") is None:
             return False
-        fd = pidfd_open(pid)
-        peer = receipt(pid)
-        try:
-            seen = set()
-            current = pid
-            while current > 1 and current not in seen and len(seen) < 256:
-                if current == root["pid"]:
-                    return (
-                        peer.get("birth") is not None
-                        and receipt(pid) == peer
-                        and receipt(root["pid"]) == root
-                    )
-                seen.add(current)
-                fields = Path(f"/proc/{current}/stat").read_text().rsplit(") ", 1)[1].split()
-                current = int(fields[1])
-            return False
-        finally:
-            os.close(fd)
+        chain = []
+        seen = set()
+        current = pid
+        while current > 1 and current not in seen and len(seen) < 256:
+            handles.append(pidfd_open(current))
+            stamp = receipt(current)
+            if stamp["birth"] is None:
+                return False
+            fields = Path(f"/proc/{current}/stat").read_text().rsplit(") ", 1)[1].split()
+            parent = int(fields[1])
+            chain.append((stamp, parent))
+            if current == root["pid"]:
+                if stamp != root or select.select(handles, [], [], 0)[0]:
+                    return False
+                for record, expected_parent in chain:
+                    fields = Path(f"/proc/{record['pid']}/stat").read_text().rsplit(") ", 1)[1].split()
+                    if int(fields[1]) != expected_parent or receipt(record["pid"]) != record:
+                        return False
+                return not select.select(handles, [], [], 0)[0]
+            seen.add(current)
+            current = parent
+        return False
     except (OSError, ValueError, IndexError):
         return False
+    finally:
+        for handle in handles:
+            os.close(handle)
 
 
 def terminate(run, include_supervisor=False):
@@ -102,6 +110,21 @@ def terminate(run, include_supervisor=False):
         uncertain = False
         changed = False
         try:
+            for record in run.get("owned_processes", []):
+                fd = None
+                try:
+                    fd = pidfd_open(record["pid"])
+                    if receipt(record["pid"]) == record and record.get("birth") is not None:
+                        if not select.select([fd], [], [], 0)[0]:
+                            descriptors.append(fd)
+                            fd = None
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                except PermissionError:
+                    uncertain = True
+                finally:
+                    if fd is not None:
+                        os.close(fd)
             for p in Path("/proc").iterdir():
                 if not p.name.isdecimal():
                     continue

@@ -19,6 +19,8 @@ import struct
 import tempfile
 import threading
 import uuid
+import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from . import processes
@@ -27,6 +29,8 @@ from .contracts import FleetError, error_record
 MAX_REQUEST = 1024 * 1024
 MAX_RESPONSE = 32 * 1024 * 1024
 OPERATIONS = {
+    "bridge_register",
+    "bridge_retire",
     "routes",
     "start",
     "start_many",
@@ -64,6 +68,9 @@ def encoded(value):
 class Client:
     contract_version = 1
 
+    def __init__(self, *, cancelled=None):
+        self.cancelled = cancelled
+
     def __getattr__(self, operation):
         if operation not in OPERATIONS:
             raise FleetError("delegation_scope", "Operation is unavailable to a delegated worker")
@@ -86,6 +93,7 @@ class Client:
             )
             if len(packet) > MAX_REQUEST:
                 raise FleetError("request", "Delegation request exceeds the message limit")
+            attempted_send = False
             try:
                 owner = json.loads(os.environ.get("HARNESSFLEET_BROKER_OWNER", "null"))
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -96,9 +104,23 @@ class Client:
                     )
                     if uid != os.getuid() or processes.receipt(pid) != owner or not processes.alive(owner):
                         raise FleetError("delegation_auth", "Delegation endpoint ownership is invalid")
+                    attempted_send = True
                     connection.sendall(packet)
                     data = bytearray()
+                    deadline = time.monotonic() + 130
                     while not data.endswith(b"\n"):
+                        if self.cancelled is not None:
+                            if self.cancelled.is_set():
+                                code = "request_uncertain" if operation in MUTATIONS else "cancelled"
+                                raise FleetError(
+                                    code,
+                                    f"Wait cancelled for request {request_id}; admitted work is unchanged",
+                                )
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError()
+                            if not select.select([connection], [], [], min(0.1, remaining))[0]:
+                                continue
                         chunk = connection.recv(min(65536, MAX_RESPONSE + 1 - len(data)))
                         if not chunk or len(data) + len(chunk) > MAX_RESPONSE:
                             raise ValueError()
@@ -111,7 +133,9 @@ class Client:
                 return response["result"]
             except (OSError, ValueError, KeyError, TypeError):
                 raise FleetError(
-                    "delegation_transport",
+                    "request_uncertain"
+                    if attempted_send and operation in MUTATIONS
+                    else "delegation_transport",
                     f"Delegation response unavailable; request {request_id} may be consumed. Reuse only this request id; never replay with a new id.",
                 )
 
@@ -150,8 +174,16 @@ def receive(connection):
 class Portal:
     """One parent's host supervisor serves its generation-specific child authority."""
 
-    def __init__(self, manager, rid, generation):
+    def __init__(self, manager, rid, generation, *, bridge_instance=None):
         self.manager, self.rid, self.generation = manager, rid, generation
+        self.bridge_instance = bridge_instance
+        self.bridge_receipt = self.bridge_handle = self.bridge_monitor = None
+        self.bridge_lock = threading.Lock()
+        self.bridge_retiring = threading.Event()
+        self.native_completed = threading.Event()
+        self.closed = False
+        self.resources = ExitStack()
+        self.failure_fd = None
         self.native_handle = None
         self.native_receipt = None
         self.directory = None
@@ -164,7 +196,7 @@ class Portal:
                 self.request.settimeout(5)
                 try:
                     packet, writer = receive(self.request)
-                    response = portal.respond(packet, writer)
+                    response = portal.respond(packet, writer, disconnect_fd=self.request.fileno())
                 except FleetError as error:
                     response = error_record(error.code, str(error))
                 except Exception:
@@ -199,6 +231,13 @@ class Portal:
                     slots.release()
 
         try:
+            if bridge_instance:
+                self.failure_fd, self.failure_write = os.pipe()
+                for fd in (self.failure_fd, self.failure_write):
+                    self.resources.callback(os.close, fd)
+                self.stop_read, self.stop_write = os.pipe()
+                for fd in (self.stop_read, self.stop_write):
+                    self.resources.callback(os.close, fd)
             self.directory = tempfile.TemporaryDirectory(prefix="harnessfleet-client-")
             self.path = str(Path(self.directory.name) / "broker.sock")
             self.server = Server(self.path, Handler, bind_and_activate=False)
@@ -206,6 +245,7 @@ class Portal:
             self.server.server_bind()
             self.server.server_activate()
         except OSError:
+            self.resources.close()
             if self.server is not None:
                 self.server.server_close()
             if self.directory is not None:
@@ -226,15 +266,88 @@ class Portal:
         self.native_handle = processes.pidfd_open(record["pid"])
         self.native_receipt = record
 
+    def complete_native(self):
+        with self.bridge_lock:
+            if self.bridge_instance and (
+                self.bridge_handle is None or select.select([self.bridge_handle], [], [], 0)[0]
+            ):
+                raise FleetError("delegation_transport", "Managed helper was not alive at native completion")
+            self.native_completed.set()
+
     def close(self):
+        with self.bridge_lock:
+            self.closed = True
+            if self.bridge_monitor:
+                os.write(self.stop_write, b"x")
+        if self.bridge_monitor:
+            self.bridge_monitor.join()
+        if self.bridge_handle is not None:
+            os.close(self.bridge_handle)
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
         if self.native_handle is not None:
             os.close(self.native_handle)
         self.directory.cleanup()
+        self.resources.close()
 
-    def respond(self, packet, writer):
+    def _register_bridge(self, parent, peer, kwargs, live):
+        if not self.bridge_instance or kwargs != {"instance": self.bridge_instance}:
+            raise FleetError("delegation_auth", "Bridge instance is not authorized")
+        with self.bridge_lock:
+            if self.closed or self.native_handle is None or select.select([self.native_handle], [], [], 0)[0]:
+                raise FleetError("delegation_auth", "Native invocation no longer accepts a bridge")
+            record = peer
+            if not live():
+                raise FleetError("delegation_auth", "Bridge process is no longer attributable")
+            if self.bridge_receipt is not None and self.bridge_receipt != record:
+                raise FleetError("delegation_auth", "Bridge replacement requires a new generation")
+            if self.bridge_receipt is None:
+                handle = processes.pidfd_open(record["pid"])
+                try:
+                    with self.manager.store.transaction() as c:
+                        current = self.manager.store.get(self.rid, c)
+                        if current["generation"] != self.generation or current["status"] != "running":
+                            raise FleetError("generation", "Bridge registration was fenced")
+                        if not live() or select.select([handle], [], [], 0)[0]:
+                            raise FleetError("delegation_auth", "Bridge process changed during registration")
+                        current["bridge_process"] = record
+                        current.setdefault("owned_processes", []).append(record)
+                        self.manager.store.save(c, current, "bridge_registered")
+                except BaseException:
+                    os.close(handle)
+                    raise
+                self.bridge_receipt, self.bridge_handle = record, handle
+
+                def watch():
+                    ready, _, _ = select.select([handle, self.stop_read], [], [])
+                    if handle in ready and not self.closed:
+                        os.write(self.failure_write, b"x")
+
+                self.bridge_monitor = threading.Thread(target=watch, daemon=True)
+                self.bridge_monitor.start()
+        return {
+            "schema_version": 1,
+            "result": {
+                "schema_version": 1,
+                "cwd": parent["cwd"],
+                "run": self.rid,
+                "generation": self.generation,
+                "bridge_instance": self.bridge_instance,
+            },
+        }
+
+    def respond(self, packet, writer, *, disconnect_fd=None):
+        try:
+            handle = processes.pidfd_open(writer[0])
+        except OSError:
+            raise FleetError("delegation_auth", "Requesting process is no longer available")
+        try:
+            return self._respond(packet, writer, handle, disconnect_fd)
+        finally:
+            os.close(handle)
+
+    def _respond(self, packet, writer, handle, disconnect_fd):
         if not isinstance(packet, dict) or packet.get("schema_version") != 1:
             raise FleetError("request", "Unsupported delegation request")
         with self.manager.store.transaction() as c:
@@ -248,6 +361,25 @@ class Portal:
         ):
             raise FleetError("delegation_auth", "Delegation capability is invalid or obsolete")
         pid, uid, _ = writer
+        if packet.get("operation") == "bridge_retire":
+            if (
+                not self.bridge_instance
+                or uid != os.getuid()
+                or self.bridge_receipt != processes.receipt(pid)
+                or self.bridge_handle is None
+                or select.select([handle, self.bridge_handle], [], [], 0)[0]
+                or packet.get("args") != []
+                or packet.get("kwargs") != {}
+            ):
+                raise FleetError("delegation_auth", "Bridge retirement is not attributable")
+            # Retirement only narrows authority. The pinned helper may acknowledge
+            # shutdown after native exit without gaining execution authority.
+            with self.manager.store.transaction() as c:
+                current = self.manager.store.get(self.rid, c)
+                if current["generation"] != self.generation or current["status"] != "running":
+                    raise FleetError("generation", "Bridge retirement was fenced")
+                self.bridge_retiring.set()
+            return {"schema_version": 1, "result": {"completed": self.native_completed.wait(5)}}
         if (
             uid != os.getuid()
             or self.native_handle is None
@@ -256,6 +388,23 @@ class Portal:
             or not processes.descendant(pid, self.native_receipt)
         ):
             raise FleetError("delegation_auth", "Writer is not an attributable native descendant")
+        peer = processes.receipt(pid)
+
+        def live():
+            try:
+                return (
+                    not self.closed
+                    and not self.bridge_retiring.is_set()
+                    and self.native_handle is not None
+                    and not select.select([handle, self.native_handle], [], [], 0)[0]
+                    and processes.receipt(pid) == peer
+                    and processes.descendant(pid, self.native_receipt)
+                )
+            except (OSError, ValueError):
+                return False
+
+        if not live():
+            raise FleetError("delegation_auth", "Requesting process identity changed")
         operation, args, kwargs = packet.get("operation"), packet.get("args"), packet.get("kwargs")
         if operation not in OPERATIONS:
             raise FleetError("delegation_scope", "Operation is unavailable to a delegated worker")
@@ -265,13 +414,40 @@ class Portal:
             or any(key.startswith("_") for key in kwargs)
         ):
             raise FleetError("request", "Invalid delegation arguments")
+        if operation == "bridge_register":
+            if args:
+                raise FleetError("request", "Invalid bridge registration")
+            return self._register_bridge(parent, peer, kwargs, live)
+        if self.bridge_instance and (
+            self.bridge_receipt != peer
+            or self.bridge_handle is None
+            or select.select([self.bridge_handle], [], [], 0)[0]
+        ):
+            raise FleetError("delegation_auth", "Only the registered bridge may use this generation")
         manager = copy.copy(self.manager)
-        manager._principal = {"id": self.rid, "generation": self.generation, "token": parent["child_token"]}
+        manager._wait_disconnect = disconnect_fd
+        manager._principal = {
+            "id": self.rid,
+            "generation": self.generation,
+            "token": parent["child_token"],
+            "live": live,
+        }
+        if self.bridge_instance:
+            manager._principal["actor"] = {
+                "kind": "stdio_bridge",
+                "id": self.bridge_instance,
+                "run": self.rid,
+                "generation": self.generation,
+                "exact_native_caller": None,
+                "completeness": "partial",
+            }
         method = getattr(manager, operation)
         try:
             bound = inspect.signature(method).bind(*args, **kwargs)
         except TypeError:
             raise FleetError("request", "Invalid delegation arguments")
+        if self.bridge_instance and operation == "routes" and bound.arguments.get("diagnose"):
+            raise FleetError("delegation_scope", "Native diagnostics are unavailable through stdio")
         if operation in RESOURCES:
             with manager.store.transaction() as c:
                 try:

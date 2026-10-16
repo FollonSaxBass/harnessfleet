@@ -25,6 +25,12 @@ retaining the marker are included. A process that scrubs both its marker and gro
 cannot be proven by this backend; arbitrary daemon containment is outside the
 backend's contract. Native tool restrictions are not OS containment.
 
+The optional stdio helper also has a generation-specific registered process receipt.
+Cleanup uses that exact PID/start identity even if the helper detaches or scrubs its
+marker. A reused identity is never signaled, and unreadable ownership retains
+uncertainty. Helper exit before native completion fails required delegation without
+restarting it. Existing children keep their own lifecycle and receipts.
+
 `run stop ID` fences new child admission before enumerating descendants and cleans
 up only demonstrably owned processes. Unknown cleanup remains `uncertain` with
 capacity retained. `run recover` checks lost controllers and local evidence. It
@@ -81,3 +87,18 @@ native sandbox modes are not a separate-user confidentiality boundary either.
 Do not run mutually untrusted work in one instance. A controller-owned registry
 with a restricted delegation client and scoped artifact access is required before
 claiming worker isolation or tamper-resistant inherited authority.
+
+
+Progress persistence has a bounded queue and a separate writer so database waits
+do not delay native completion checks. It retains every submitted progress record
+in order during successful execution. Failure cancels uncommitted pending progress;
+the reader's bounded native evidence remains available on the existing artifact
+path. Overflow, persistence deadline or non-retryable I/O failure prevents
+successful output publication. Only a confirmed rollback after SQLite busy/locked
+may retry this metadata batch; native invocations never retry with it.
+
+Normal completion flushes progress and confirms writer termination before terminal
+publication. If a writer does not terminate, `progress_uncertain` retains capacity
+and forbids accepted output. Cancellation cannot hard-interrupt an arbitrary
+filesystem syscall. Reconciliation must continue to prove supervisor/process
+termination; elapsed timeout alone does not release capacity or authorize replay.

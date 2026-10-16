@@ -6,6 +6,11 @@ from pathlib import Path
 from .contracts import FleetError
 
 HARNESS_IDS = ("codex_cli", "codex_app", "claude_code", "agy_cli", "agy_app", "cursor_agent", "dsh")
+TRANSPORTS = {"disabled", "experimental-unix-v1", "experimental-stdio-mcp-v1"}
+
+
+def authorized_transports(grant):
+    return set(grant.get("delegation_transports", [grant.get("delegation_transport", "disabled")]))
 
 
 def locations():
@@ -80,10 +85,15 @@ def load(path=None):
                 raise ValueError()
             if type(r.get("concurrency", 1)) is not int or r.get("concurrency", 1) < 1:
                 raise ValueError()
-            if r.get("delegation_transport", "disabled") not in ("disabled", "experimental-unix-v1"):
+            if r.get("delegation_transport", "disabled") not in TRANSPORTS:
                 raise ValueError()
         p = data["policy"]
-        if p.get("delegation_transport", "disabled") not in ("disabled", "experimental-unix-v1"):
+        if p.get("delegation_transport", "disabled") not in TRANSPORTS:
+            raise ValueError()
+        if "delegation_transports" in p and (
+            not isinstance(p["delegation_transports"], list)
+            or any(value not in TRANSPORTS - {"disabled"} for value in p["delegation_transports"])
+        ):
             raise ValueError()
         for key in ("max_depth", "max_parallel", "max_invocations"):
             if type(p[key]) is not int or p[key] < 1:

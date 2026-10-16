@@ -20,6 +20,15 @@ AUTH_KEYS = (
 )
 
 
+def inline_toml(value):
+    """Encode the owned stdio configuration without interpolating native TOML."""
+    if isinstance(value, dict):
+        return "{" + ",".join(inline_toml(k) + "=" + inline_toml(v) for k, v in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(inline_toml(v) for v in value) + "]"
+    return json.dumps(value, ensure_ascii=False, allow_nan=False).replace("\x7f", "\\u007f")
+
+
 class Base:
     contract_version = 1
     capabilities = Capabilities()
@@ -98,7 +107,7 @@ class Codex(Base):
             "-c",
             'approval_policy="never"',
             "-c",
-            "mcp_servers={}",
+            "mcp_servers=" + inline_toml(run.get("_mcp_servers", {})),
             "-c",
             "forced_login_method=" + json.dumps("chatgpt" if route["billing"] == "subscription" else "api"),
         ]

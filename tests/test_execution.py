@@ -447,3 +447,26 @@ def test_orphaned_managed_child_continuation_is_refused_before_admission(instanc
     assert e.value.code == "parent"
     assert instance.m.status(child["id"])["generation"] == 1
     assert len(instance.calls()) == 2
+
+
+def test_progress_batches_preserve_every_event_before_terminal_publication(instance):
+    run = instance.m.start("codex-local", "mode:progress-burst", delegation="leaf")
+    final = instance.finish(run)
+    assert final["accepted"] and final["cleanup_confirmed"]
+    events = []
+    after = 0
+    while True:
+        page = instance.m.events(run["id"], after)["events"]
+        if not page:
+            break
+        events.extend(page)
+        after = page[-1]["seq"]
+    assert [e["data"]["type"] for e in events if e["kind"] == "progress"] == [
+        "thread.started",
+        *[f"fixture.{number}" for number in range(300)],
+        "item.completed",
+        "turn.completed",
+    ]
+    assert events[-1]["kind"] == "completed"
+    assert instance.m.output(run["id"])["verified"]
+    assert final["session_id"]
