@@ -1,6 +1,7 @@
 """Exercise the wire protocol in isolated processes with a synthetic broker client."""
 
 import fcntl
+import itertools
 import json
 import os
 from pathlib import Path
@@ -103,6 +104,7 @@ class Wire:
     def __init__(self, process):
         self.process = process
         self.buffer = bytearray()
+        self.ids = itertools.count(1000)
 
     def send(self, packet):
         self.raw((json.dumps(packet) + "\n").encode())
@@ -124,7 +126,8 @@ class Wire:
         self.buffer = bytearray(rest)
         return json.loads(line)
 
-    def request(self, method, params=None, rid=1):
+    def request(self, method, params=None, rid=None):
+        rid = next(self.ids) if rid is None else rid
         self.send(dict(jsonrpc="2.0", id=rid, method=method, params=params or {}))
         return self.recv()
 
@@ -137,7 +140,8 @@ class Wire:
         assert "result" in self.request("tools/list")
         return result
 
-    def call(self, operation="status", arguments=None, rid=2, request_id=None):
+    def call(self, operation="status", arguments=None, rid=None, request_id=None):
+        rid = next(self.ids) if rid is None else rid
         tool = dict(operation=operation, arguments=arguments or {})
         if request_id is not None:
             tool["request_id"] = request_id
@@ -277,6 +281,20 @@ def test_initialization_and_public_tool(launch, version):
     assert envelope(wire.recv())["result"] == dict(operation="status", arguments={"rid": "child"})
 
 
+def test_public_tool_discloses_resource_keyword_to_native_clients(launch):
+    wire = launch()
+    wire.initialize()
+    tool = wire.request("tools/list")["result"]["tools"][0]
+    arguments = tool["inputSchema"]["properties"]["arguments"]
+    assert arguments["properties"]["rid"]["type"] == "string"
+    assert "follow" in arguments["properties"]["rid"]["description"]
+    assert arguments["properties"]["timeout"]["type"] == "number"
+    wire.call(operation="follow", arguments={"rid": "child", "timeout": 120})
+    assert envelope(wire.recv())["result"] == dict(
+        operation="wait", arguments={"rid": "child", "timeout": 120}
+    )
+
+
 @pytest.mark.parametrize("operation", ["start", "start_many", "cancel", "stop", "resume"])
 def test_mutations_require_supplied_id(launch, operation):
     wire = launch()
@@ -368,7 +386,7 @@ def test_two_slots_duplicate_ids_cancellation_and_surviving_work(launch):
     assert response["id"] == 10
     assert envelope(response)["request_id"] == "d" * 32
     assert envelope(response)["error"]["code"] == "cancelled"
-    wire.call("status", {"behavior": "receipt"}, rid=12)
+    wire.call("status", {"behavior": "receipt"}, rid=13)
     assert envelope(wire.recv())["result"] == {"admitted": True}
 
 

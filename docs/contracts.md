@@ -129,6 +129,10 @@ public RunManager keyword arguments; `follow` maps to `wait`. Mutations require 
 caller-supplied 32-hex ID before dispatch. JSON-RPC IDs correlate protocol messages
 and do not authorize replay. A tool response contains the v1 result/error envelope
 as JSON text, with `isError` on failure. No arbitrary argv or shell executor exists.
+The published tool schema describes resource argument `rid` and follower `timeout`.
+For example, `follow` takes `{"rid":"CHILD_ID","timeout":120}` and `output` takes
+`{"rid":"CHILD_ID"}`. Correcting a rejected read request does not require another
+native invocation; consumed mutations retain their original request ids.
 
 An additive public run field `requesting_actor` is null or contains bridge kind,
 opaque instance `id`, originating `run` and `generation`, `exact_native_caller: null`
