@@ -34,10 +34,19 @@ class Client:
 
     def bridge_register(self, *, instance):
         os.write(2, b"fixture registration\n")
+        if os.environ.get("HF_PROTO_REGISTER_WAIT"):
+            if self.cancelled is None:
+                time.sleep(60)
+            else:
+                while not self.cancelled.is_set():
+                    time.sleep(0.001)
+            raise FleetError("cancelled", "Registration response cancelled")
         return dict(schema_version=1, cwd="/recorded/parent", bridge_instance=instance,
                     run=os.environ["HARNESSFLEET_PARENT_RUN"], generation=3)
 
     def bridge_retire(self):
+        if os.environ.get("HF_PROTO_REGISTER_WAIT"):
+            os.write(2, b"fixture retirement\n")
         if os.environ.get("HF_PROTO_RETIRE_WAIT"):
             time.sleep(60)
         return {"completed": True}
@@ -515,3 +524,12 @@ def test_sigterm_is_not_disabled_by_an_inherited_mask(launch):
     wire.initialize()
     wire.process.send_signal(signal.SIGTERM)
     assert wire.process.wait(timeout=1) == 0
+
+
+def test_sigterm_during_registration_retires_without_default_signal_exit(launch):
+    wire = launch({"HF_PROTO_REGISTER_WAIT": "1"})
+    assert select.select([wire.process.stderr], [], [], 3)[0]
+    assert wire.process.stderr.readline() == b"fixture registration\n"
+    wire.process.send_signal(signal.SIGTERM)
+    assert wire.process.wait(timeout=1) == 2
+    assert b"fixture retirement\n" in wire.process.stderr.read()

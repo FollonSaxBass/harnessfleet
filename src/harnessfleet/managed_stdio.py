@@ -436,40 +436,66 @@ def _retire():
         cancelled.set()
 
 
+class _Shutdown:
+    requested = False
+
+    def is_set(self):
+        return self.requested
+
+
 def serve():
     """Serve MCP on stdin/stdout; invalid managed startup never opens local state."""
+    shutdown = _Shutdown()
+    server = None
+    registration_attempted = False
+
+    def request_shutdown(*_):
+        shutdown.requested = True
+        if server is not None:
+            server.request_shutdown()
+
+    previous = signal.signal(signal.SIGTERM, request_shutdown)
+    previous_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     try:
-        _context()
-        registration = Client().bridge_register(instance=os.environ["HARNESSFLEET_BRIDGE_INSTANCE"])
-        if (
-            not isinstance(registration, dict)
-            or registration.get("schema_version") != 1
-            or registration.get("bridge_instance") != os.environ["HARNESSFLEET_BRIDGE_INSTANCE"]
-            or registration.get("run") != os.environ["HARNESSFLEET_PARENT_RUN"]
-            or type(registration.get("generation")) is not int
-            or registration["generation"] != int(os.environ["HARNESSFLEET_PARENT_GENERATION"])
-            or not isinstance(registration.get("cwd"), str)
-            or not registration["cwd"].startswith("/")
-        ):
-            raise ValueError()
-    except Exception:
-        os.write(2, b"Managed stdio startup rejected\n")
-        return 2
-    try:
-        server = _Server(registration["cwd"])
-        previous = signal.signal(signal.SIGTERM, lambda *_: server.request_shutdown())
-        previous_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         try:
+            _context()
+            if shutdown.is_set():
+                raise ValueError()
+            registration_attempted = True
+            registration = Client(cancelled=shutdown).bridge_register(
+                instance=os.environ["HARNESSFLEET_BRIDGE_INSTANCE"]
+            )
+            if (
+                not isinstance(registration, dict)
+                or registration.get("schema_version") != 1
+                or registration.get("bridge_instance") != os.environ["HARNESSFLEET_BRIDGE_INSTANCE"]
+                or registration.get("run") != os.environ["HARNESSFLEET_PARENT_RUN"]
+                or type(registration.get("generation")) is not int
+                or registration["generation"] != int(os.environ["HARNESSFLEET_PARENT_GENERATION"])
+                or not isinstance(registration.get("cwd"), str)
+                or not registration["cwd"].startswith("/")
+            ):
+                raise ValueError()
+        except Exception:
+            if registration_attempted and shutdown.is_set():
+                _retire()
+            os.write(2, b"Managed stdio startup rejected\n")
+            return 2
+        try:
+            server = _Server(registration["cwd"])
+            if shutdown.is_set():
+                server.request_shutdown()
             result = server.run()
             return result if result else (0 if _retire() else 2)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-            signal.signal(signal.SIGTERM, previous)
+        except Exception:
+            os.write(2, b"Managed stdio transport retired\n")
+            return 2
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        signal.signal(signal.SIGTERM, previous)
+        if server is not None:
             os.close(server.wakeup_read)
             os.close(server.wakeup_write)
-    except Exception:
-        os.write(2, b"Managed stdio transport retired\n")
-        return 2
 
 
 if __name__ == "__main__":
