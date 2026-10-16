@@ -92,6 +92,7 @@ class Client:
             )
             if len(packet) > MAX_REQUEST:
                 raise FleetError("request", "Delegation request exceeds the message limit")
+            attempted_send = False
             try:
                 owner = json.loads(os.environ.get("HARNESSFLEET_BROKER_OWNER", "null"))
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -102,6 +103,7 @@ class Client:
                     )
                     if uid != os.getuid() or processes.receipt(pid) != owner or not processes.alive(owner):
                         raise FleetError("delegation_auth", "Delegation endpoint ownership is invalid")
+                    attempted_send = True
                     connection.sendall(packet)
                     data = bytearray()
                     deadline = time.monotonic() + 130
@@ -127,7 +129,7 @@ class Client:
                 return response["result"]
             except (OSError, ValueError, KeyError, TypeError):
                 raise FleetError(
-                    "delegation_transport",
+                    "request_uncertain" if attempted_send and operation in MUTATIONS else "delegation_transport",
                     f"Delegation response unavailable; request {request_id} may be consumed. Reuse only this request id; never replay with a new id.",
                 )
 
@@ -257,9 +259,11 @@ class Portal:
         self.native_receipt = record
 
     def close(self):
-        self.closed = True
+        with self.bridge_lock:
+            self.closed = True
+            if self.bridge_monitor:
+                os.write(self.stop_write, b"x")
         if self.bridge_monitor:
-            os.write(self.stop_write, b"x")
             self.bridge_monitor.join()
         if self.bridge_handle is not None:
             os.close(self.bridge_handle)
@@ -275,6 +279,8 @@ class Portal:
         if not self.bridge_instance or kwargs != {"instance": self.bridge_instance}:
             raise FleetError("delegation_auth", "Bridge instance is not authorized")
         with self.bridge_lock:
+            if self.closed or self.native_handle is None or select.select([self.native_handle], [], [], 0)[0]:
+                raise FleetError("delegation_auth", "Native invocation no longer accepts a bridge")
             record = processes.receipt(writer[0])
             if self.bridge_receipt is not None and self.bridge_receipt != record:
                 raise FleetError("delegation_auth", "Bridge replacement requires a new generation")
@@ -286,6 +292,7 @@ class Portal:
                         if current["generation"] != self.generation or current["status"] != "running":
                             raise FleetError("generation", "Bridge registration was fenced")
                         current["bridge_process"] = record
+                        current.setdefault("owned_processes", []).append(record)
                         self.manager.store.save(c, current, "bridge_registered")
                 except BaseException:
                     os.close(handle)
