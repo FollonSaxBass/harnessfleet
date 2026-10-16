@@ -68,7 +68,10 @@ kinds, not raw tool payloads. Supervisors persist progress asynchronously in ord
 batches, so live progress and native session updates can lag their source events.
 Successful completion flushes every submitted event and session update before
 publishing the terminal record. Failure/cancellation can discard pending progress;
-a supervisor crash can lose its uncommitted suffix. Durable invocation/ownership
+a supervisor crash can lose its uncommitted suffix. The terminal `completed` event
+reports `progress_settled` separately from the run's original failure code. An
+unsettled writer retains uncertain cleanup and capacity without replacing that
+cause or publishing accepted output. Durable invocation/ownership
 records still prohibit replay. Full native
 JSONL is retained separately as bounded, redacted evidence when supervision finishes.
 Follow blocks on Linux notifications; a lost supervisor

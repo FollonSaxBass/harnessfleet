@@ -345,7 +345,7 @@ def supervise(rid, generation):
             portal.close()
         progress_settled = progress is None or progress.join()
         if not progress_settled:
-            failure = "progress_uncertain"
+            failure = failure or "progress_uncertain"
         # Child exit does not prove descendant cleanup. Keep capacity on uncertainty.
         current = s.get(rid)
         if current["generation"] != generation:
@@ -408,7 +408,12 @@ def supervise(rid, generation):
                 "output_sha256": current.get("output_sha256"),
             }
             s.write_artifact(rid, generation, "receipt.json", json.dumps(receipt))
-            s.save(c, current, "completed", {"status": state, "accepted": accepted})
+            s.save(
+                c,
+                current,
+                "completed",
+                {"status": state, "accepted": accepted, "progress_settled": progress_settled},
+            )
         from .notifications import notify
 
         notify(m, current)

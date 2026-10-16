@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,11 +32,31 @@ if 'mode:stdio' in task:
         rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}})
         helper.stdin.write(json.dumps({'jsonrpc':'2.0','method':'notifications/initialized'})+'\n');helper.stdin.flush()
         rpc('tools/list',{})
+        if 'mode:stdio-blocked-progress' in task:
+            from pathlib import Path
+            project=Path.cwd()
+            deadline=time.monotonic()+8
+            while not (project/'persistence-entered').exists():
+                assert time.monotonic()<deadline
+                time.sleep(0.001)
+            if 'cause:helper' in task:
+                helper.kill();helper.wait(timeout=3);time.sleep(8)
+            elif 'cause:protocol' in task:
+                print('malformed native record',flush=True);time.sleep(8)
+            else:
+                emit({'type':'item.completed','item':{'type':'agent_message','text':'unverified final'}})
+                emit({'type':'turn.completed'})
+                helper.stdin.close();helper.wait(timeout=3)
+                raise SystemExit(0)
         if 'mode:stdio-store-contention' in task:
             from pathlib import Path
             project=Path.cwd()
             (project/'native-ready').touch()
             deadline=time.monotonic()+8
+            while not (project/'contention-held').exists():
+                assert time.monotonic()<deadline
+                time.sleep(0.001)
+            emit({'type':'fixture.contention'})
             while not (project/'native-release').exists():
                 assert time.monotonic()<deadline
                 time.sleep(0.001)
@@ -215,10 +236,24 @@ def test_malformed_transport_authorization_does_not_broaden_policy(instance):
     assert error.value.code == "configuration"
 
 
-def test_store_contention_does_not_delay_observing_live_helper_completion(stdio):
+def test_store_contention_does_not_delay_observing_live_helper_completion(stdio, monkeypatch):
     from harnessfleet import processes
     import time
 
+    fault = stdio.path / "fault"
+    fault.mkdir()
+    (fault / "sitecustomize.py").write_text("""
+import sys
+if 'harnessfleet.worker' in sys.orig_argv:
+    from harnessfleet.storage import Store
+    original = Store.persist_progress_batch
+    def witnessed(self, *args, **kwargs):
+        if (self.root.parent/'contention-held').exists():
+            (self.root.parent/'persistence-entered').touch()
+        return original(self, *args, **kwargs)
+    Store.persist_progress_batch = witnessed
+""")
+    monkeypatch.setenv("PYTHONPATH", str(fault) + os.pathsep + os.environ.get("PYTHONPATH", ""))
     watch = processes.Changes(stdio.path)
     try:
         parent = stdio.start("mode:stdio-store-contention")
@@ -227,6 +262,11 @@ def test_store_contention_does_not_delay_observing_live_helper_completion(stdio)
             assert time.monotonic() < deadline, "Native MCP did not initialize"
             watch.wait(1)
         with stdio.m.store.transaction():
+            (stdio.path / "contention-held").touch()
+            deadline = time.monotonic() + 4
+            while not (stdio.path / "persistence-entered").exists():
+                assert time.monotonic() < deadline, "Progress persistence did not enter under the lock"
+                watch.wait(1)
             (stdio.path / "native-release").touch()
             deadline = time.monotonic() + 4
             while not (stdio.path / "helper-dead").exists():
@@ -237,3 +277,46 @@ def test_store_contention_does_not_delay_observing_live_helper_completion(stdio)
         assert stdio.m.output(parent["id"])["text"] == "final during progress contention"
     finally:
         watch.close()
+
+
+@pytest.mark.parametrize(
+    "cause,expected",
+    [("helper", "delegation_transport"), ("protocol", "protocol"), ("timeout", "progress_timeout")],
+)
+def test_unsettled_progress_preserves_original_failure_and_capacity(stdio, monkeypatch, cause, expected):
+    fault = stdio.path / "fault"
+    fault.mkdir()
+    (fault / "sitecustomize.py").write_text("""
+import sys,time
+from pathlib import Path
+if 'harnessfleet.worker' in sys.orig_argv:
+    from harnessfleet.storage import Store
+    from harnessfleet.progress import ProgressWriter
+    original = Store.persist_progress_batch
+    def blocked(self, *args, **kwargs):
+        project = self.root.parent
+        (project/'persistence-entered').touch()
+        while not (project/'persistence-release').exists():time.sleep(0.005)
+        return original(self, *args, **kwargs)
+    Store.persist_progress_batch = blocked
+    finish = ProgressWriter.finish
+    ProgressWriter.finish = lambda self: finish(self, timeout=0.05)
+""")
+    monkeypatch.setenv("PYTHONPATH", str(fault) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    try:
+        parent = stdio.start("mode:stdio-blocked-progress cause:" + cause)
+        final = stdio.finish(parent)
+        assert final["status"] == "uncertain" and not final["accepted"]
+        assert not final["cleanup_confirmed"]
+        assert final["failure"] == expected
+        terminal = stdio.m.events(parent["id"])["events"][-1]
+        assert terminal["kind"] == "completed" and terminal["data"]["progress_settled"] is False
+        with pytest.raises(FleetError) as error:
+            stdio.m.output(parent["id"])
+        assert error.value.code == "no_final_output"
+        with pytest.raises(FleetError) as error:
+            stdio.start()
+        assert error.value.code == "capacity"
+        assert len(stdio.calls()) == 1
+    finally:
+        (stdio.path / "persistence-release").touch()
