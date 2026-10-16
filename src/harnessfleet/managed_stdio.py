@@ -57,7 +57,9 @@ TOOL = {
     "description": (
         "Manage child runs of the registered managed run execution parent. "
         "The requesting actor is stdio_bridge; the exact subagent is unknown. "
-        "Mutations require a caller-supplied request_id; reuse it to reconcile uncertain results."
+        "Mutations require a caller-supplied request_id; reuse it to reconcile uncertain results. "
+        'Follow a child with operation="follow", arguments={"rid":"CHILD_ID","timeout":120}; '
+        'read its verified result with operation="output", arguments={"rid":"CHILD_ID"}.'
     ),
     "inputSchema": {
         "type": "object",
@@ -65,7 +67,34 @@ TOOL = {
         "required": ["operation", "arguments"],
         "properties": {
             "operation": {"type": "string", "enum": OPERATION_NAMES},
-            "arguments": {"type": "object"},
+            "arguments": {
+                "type": "object",
+                "description": "Public RunManager keyword arguments for the selected operation.",
+                "properties": {
+                    "rid": {
+                        "type": "string",
+                        "description": "Child Agent Run id, required for status, events, follow, output, cancel, stop and resume.",
+                    },
+                    "timeout": {"type": "number", "description": "Follower wait in seconds, at most 120."},
+                    "route": {"type": "string"},
+                    "model": {"type": "string"},
+                    "assignment": {"type": "string"},
+                    "billing": {"type": "string"},
+                    "permission": {"type": "string"},
+                    "cwd": {"type": ["string", "null"]},
+                    "queue": {"type": "boolean"},
+                    "targets": {"type": "array", "items": {"type": "object"}},
+                    "selection": {"type": ["object", "null"]},
+                    "auto_resume": {"type": "integer"},
+                    "delegation": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                    "after": {"type": "integer"},
+                    "generation": {"type": ["integer", "null"]},
+                    "partial": {"type": "boolean"},
+                    "expected_generation": {"type": ["integer", "null"]},
+                },
+            },
             "request_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
         },
     },

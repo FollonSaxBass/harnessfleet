@@ -277,6 +277,20 @@ def test_initialization_and_public_tool(launch, version):
     assert envelope(wire.recv())["result"] == dict(operation="status", arguments={"rid": "child"})
 
 
+def test_public_tool_discloses_resource_keyword_to_native_clients(launch):
+    wire = launch()
+    wire.initialize()
+    tool = wire.request("tools/list")["result"]["tools"][0]
+    arguments = tool["inputSchema"]["properties"]["arguments"]
+    assert arguments["properties"]["rid"]["type"] == "string"
+    assert "follow" in arguments["properties"]["rid"]["description"]
+    assert arguments["properties"]["timeout"]["type"] == "number"
+    wire.call(operation="follow", arguments={"rid": "child", "timeout": 120})
+    assert envelope(wire.recv())["result"] == dict(
+        operation="wait", arguments={"rid": "child", "timeout": 120}
+    )
+
+
 @pytest.mark.parametrize("operation", ["start", "start_many", "cancel", "stop", "resume"])
 def test_mutations_require_supplied_id(launch, operation):
     wire = launch()

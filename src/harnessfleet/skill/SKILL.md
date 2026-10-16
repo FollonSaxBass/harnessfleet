@@ -78,6 +78,13 @@ as the installed CLI: `routes`, `start`, `start_many`, `list`, `status`, `events
 in `arguments`. Resolve omitted and relative child directories from the parent's
 recorded cwd. Preserve all explicit targets, billing and permission constraints.
 
+Use `rid` for the child Run ID in resource operations. For example, after `start`
+returns an `id`, follow with `{"operation":"follow","arguments":{"rid":"CHILD_ID","timeout":120}}`,
+then read `{"operation":"output","arguments":{"rid":"CHILD_ID"}}`. `status`, `events`,
+`cancel`, `stop` and `resume` also use `rid`. A rejected read request can be corrected
+without launching or resuming another invocation. Never repeat a consumed launch
+to repair a follower or output request.
+
 Create and retain a distinct 32-hex `request_id` before every mutation. Uncertainty
 requires inspection or reconciliation with that same ID and content. A timeout or
 cancelled follower leaves admitted work running. The bridge represents this managed
