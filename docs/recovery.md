@@ -87,3 +87,18 @@ native sandbox modes are not a separate-user confidentiality boundary either.
 Do not run mutually untrusted work in one instance. A controller-owned registry
 with a restricted delegation client and scoped artifact access is required before
 claiming worker isolation or tamper-resistant inherited authority.
+
+
+Progress persistence has a bounded queue and a separate writer so database waits
+do not delay native completion checks. It retains every submitted progress record
+in order during successful execution. Failure cancels uncommitted pending progress;
+the reader's bounded native evidence remains available on the existing artifact
+path. Overflow, persistence deadline or non-retryable I/O failure prevents
+successful output publication. Only a confirmed rollback after SQLite busy/locked
+may retry this metadata batch; native invocations never retry with it.
+
+Normal completion flushes progress and confirms writer termination before terminal
+publication. If a writer does not terminate, `progress_uncertain` retains capacity
+and forbids accepted output. Cancellation cannot hard-interrupt an arbitrary
+filesystem syscall. Reconciliation must continue to prove supervisor/process
+termination; elapsed timeout alone does not release capacity or authorize replay.

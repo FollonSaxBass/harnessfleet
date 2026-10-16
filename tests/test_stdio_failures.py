@@ -148,3 +148,56 @@ def test_cancelled_followers_release_real_broker_capacity_without_stopping_child
                 current["native_process"] = stored["native_process"]
                 instance.m.store.save(c, current, "synthetic_native_restored")
         watch.close()
+
+
+@pytest.mark.parametrize("helper_failed", [False, True])
+def test_progress_error_wakes_idle_reader_and_preserves_helper_failure_precedence(helper_failed):
+    from harnessfleet.progress import ProgressWriter
+
+    class BrokenStore:
+        def persist_progress_batch(self, *args, **kwargs):
+            raise OSError("synthetic persistence failure")
+
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", 'print(\'{"type":"thread.started"}\',flush=True);input()'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    read, write = os.pipe()
+    portal = SimpleNamespace(failure_fd=read, bridge_handle=None)
+    progress = ProgressWriter(BrokenStore(), "a" * 24, 1)
+    lines = native_lines(process, [], portal, progress=progress)
+    observed = queue.Queue()
+    reader = None
+    try:
+        assert json.loads(next(lines))["type"] == "thread.started"
+        if helper_failed:
+            os.write(write, b"helper failed")
+        progress.submit("thread.started", "synthetic-session")
+
+        def read_next():
+            try:
+                next(lines)
+            except Exception as error:
+                observed.put(error.code if isinstance(error, FleetError) else "execution")
+            else:
+                observed.put("unexpected native output")
+
+        reader = threading.Thread(target=read_next)
+        reader.start()
+        assert observed.get(timeout=2) == ("delegation_transport" if helper_failed else "execution")
+    finally:
+        progress.cancel()
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
+        if reader is not None:
+            reader.join(timeout=2)
+            assert not reader.is_alive()
+        lines.close()
+        assert progress.join()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
+        os.close(read)
+        os.close(write)

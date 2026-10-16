@@ -31,6 +31,20 @@ if 'mode:stdio' in task:
         rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}})
         helper.stdin.write(json.dumps({'jsonrpc':'2.0','method':'notifications/initialized'})+'\n');helper.stdin.flush()
         rpc('tools/list',{})
+        if 'mode:stdio-store-contention' in task:
+            from pathlib import Path
+            project=Path.cwd()
+            (project/'native-ready').touch()
+            deadline=time.monotonic()+8
+            while not (project/'native-release').exists():
+                assert time.monotonic()<deadline
+                time.sleep(0.001)
+            emit({'type':'item.completed','item':{'type':'agent_message','text':'final during progress contention'}})
+            emit({'type':'turn.completed'})
+            time.sleep(0.5)
+            helper.kill();helper.wait(timeout=3)
+            (project/'helper-dead').touch()
+            raise SystemExit(0)
         routes=call('routes')['result']['routes']
         if 'mode:stdio-crash' in task:
             helper.kill();helper.wait(timeout=5);time.sleep(8)
@@ -199,3 +213,27 @@ def test_malformed_transport_authorization_does_not_broaden_policy(instance):
     with pytest.raises(FleetError) as error:
         instance.m.routes()
     assert error.value.code == "configuration"
+
+
+def test_store_contention_does_not_delay_observing_live_helper_completion(stdio):
+    from harnessfleet import processes
+    import time
+
+    watch = processes.Changes(stdio.path)
+    try:
+        parent = stdio.start("mode:stdio-store-contention")
+        deadline = time.monotonic() + 8
+        while not (stdio.path / "native-ready").exists():
+            assert time.monotonic() < deadline, "Native MCP did not initialize"
+            watch.wait(1)
+        with stdio.m.store.transaction():
+            (stdio.path / "native-release").touch()
+            deadline = time.monotonic() + 4
+            while not (stdio.path / "helper-dead").exists():
+                assert time.monotonic() < deadline, "Native did not finish its bounded shutdown"
+                watch.wait(1)
+        final = stdio.finish(parent)
+        assert final["status"] == "finished" and final["accepted"] and final["cleanup_confirmed"]
+        assert stdio.m.output(parent["id"])["text"] == "final during progress contention"
+    finally:
+        watch.close()

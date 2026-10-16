@@ -64,7 +64,14 @@ evidence. Bounded reads reject links, special files and traversal.
 
 `run events ID --after SEQ` returns monotonically numbered execution events,
 generation, timestamp, kind and a bounded structured detail. Progress contains event
-kinds, not raw tool payloads. Follow blocks on Linux notifications; a lost supervisor
+kinds, not raw tool payloads. Supervisors persist progress asynchronously in ordered
+batches, so live progress and native session updates can lag their source events.
+Successful completion flushes every submitted event and session update before
+publishing the terminal record. Failure/cancellation can discard pending progress;
+a supervisor crash can lose its uncommitted suffix. Durable invocation/ownership
+records still prohibit replay. Full native
+JSONL is retained separately as bounded, redacted evidence when supervision finishes.
+Follow blocks on Linux notifications; a lost supervisor
 is reconciled without re-invocation. Timeout leaves execution running.
 
 `Graph(manager).page(parent=None,offset=0,limit=50,query="")` is also exposed by

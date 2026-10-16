@@ -36,18 +36,48 @@ class Store:
         os.chmod(self.db, 0o600)
 
     @contextlib.contextmanager
-    def transaction(self):
-        c = sqlite3.connect(self.db, timeout=15)
+    def transaction(self, timeout=15, *, progress_retry=False):
+        c = sqlite3.connect(self.db, timeout=timeout)
+        begun = False
         try:
             c.execute("PRAGMA foreign_keys=ON")
             c.execute("BEGIN IMMEDIATE")
+            begun = True
             yield c
             c.commit()
-        except BaseException:
+        except BaseException as error:
+            # An exception after commit can be a lost acknowledgement, not a rollback.
+            active = c.in_transaction
             c.rollback()
+            code = getattr(error, "sqlite_errorcode", None)
+            if (
+                progress_retry
+                and (not begun or active)
+                and isinstance(error, sqlite3.OperationalError)
+                and isinstance(code, int)
+                and (code & 255) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            ):
+                raise FleetError("progress_busy", "Progress transaction was rolled back") from error
             raise
         finally:
             c.close()
+
+    def persist_progress_batch(self, rid, generation, records, *, timeout=0.05, cancelled=None):
+        with self.transaction(timeout, progress_retry=True) as c:
+            current = self.get(rid, c)
+            if current["generation"] != generation or current["status"] != "running":
+                raise FleetError("generation", "Progress belongs to an inactive generation")
+            if cancelled is not None and cancelled():
+                raise FleetError("cancelled", "Progress persistence was cancelled")
+            for _, session_id in records:
+                if session_id is not None:
+                    current["session_id"] = session_id
+            current["updated_at"] = time.time()
+            self.save(c, current, "progress", {"type": records[0][0]})
+            for kind, _ in records[1:]:
+                self.event(c, current, "progress", {"type": kind})
+            if cancelled is not None and cancelled():
+                raise FleetError("cancelled", "Progress persistence was cancelled")
 
     def all(self, c=None):
         if c is None:

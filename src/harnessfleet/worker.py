@@ -10,6 +10,7 @@ from .contracts import ACTIVE, FleetError, Result
 from .manager import RunManager
 from . import processes
 from .storage import MAX_ARTIFACT
+from .progress import ProgressWriter
 
 
 def redact(text, env=None):
@@ -25,7 +26,7 @@ def redact(text, env=None):
     return re.sub(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b", "[redacted]", value)
 
 
-def native_lines(process, stderr_chunks, portal=None, completed=None):
+def native_lines(process, stderr_chunks, portal=None, completed=None, progress=None):
     """Read bounded protocol/stderr streams until the native pidfd signals exit."""
     import select
     import selectors
@@ -41,24 +42,33 @@ def native_lines(process, stderr_chunks, portal=None, completed=None):
     monitor.register(death, selectors.EVENT_READ, "exit")
     if portal is not None and portal.failure_fd is not None:
         monitor.register(portal.failure_fd, selectors.EVENT_READ, "bridge_failure")
+    if progress is not None:
+        monitor.register(progress.failure_fd, selectors.EVENT_READ, "progress_failure")
     pending = b""
     error_size = 0
     exited = False
     open_streams = {output_fd, error_fd}
 
-    def check_bridge():
-        if portal is None or portal.failure_fd is None or completed():
-            return
-        handles = [portal.failure_fd]
-        if getattr(portal, "bridge_handle", None) is not None:
-            handles.append(portal.bridge_handle)
-        if select.select(handles, [], [], 0)[0]:
-            raise FleetError("delegation_transport", "Managed stdio helper exited; it will not be restarted")
+    def check_failures():
+        if (
+            portal is not None
+            and portal.failure_fd is not None
+            and not (completed is not None and completed())
+        ):
+            handles = [portal.failure_fd]
+            if getattr(portal, "bridge_handle", None) is not None:
+                handles.append(portal.bridge_handle)
+            if select.select(handles, [], [], 0)[0]:
+                raise FleetError(
+                    "delegation_transport", "Managed stdio helper exited; it will not be restarted"
+                )
+        if progress is not None:
+            progress.raise_if_failed()
 
     try:
         while True:
             events = monitor.select()
-            check_bridge()
+            check_failures()
             exited = exited or any(key.data == "exit" for key, _ in events)
             for fd in list(open_streams):
                 while True:
@@ -81,15 +91,15 @@ def native_lines(process, stderr_chunks, portal=None, completed=None):
                         raise FleetError("protocol", "Native line exceeded bounded limits")
                     while b"\n" in pending:
                         line, pending = pending.split(b"\n", 1)
-                        check_bridge()
+                        check_failures()
                         yield line + b"\n"
             for key, _ in events:
                 if key.data == "bridge_failure":
                     monitor.unregister(key.fd)
-                    check_bridge()
+                    check_failures()
             if exited:
                 if pending:
-                    check_bridge()
+                    check_failures()
                     yield pending
                 return
     finally:
@@ -137,6 +147,8 @@ def supervise(rid, generation):
     failure = None
     native_env = {}
     portal = None
+    progress = None
+    lines = None
     stderr_chunks = []
     try:
         directory = s.directory(rid, generation)
@@ -285,10 +297,12 @@ def supervise(rid, generation):
             if portal is not None:
                 portal.bind_native(current["native_process"])
             s.save(c, current, "native_created")
+        progress = ProgressWriter(s, rid, generation)
         broker = threading.Thread(target=serve_children, args=(m, rid, generation, stopped), daemon=True)
         broker.start()
         size = 0
-        for line in native_lines(process, stderr_chunks, portal, lambda: result.completed):
+        lines = native_lines(process, stderr_chunks, portal, lambda: result.completed, progress)
+        for line in lines:
             size += len(line)
             if len(line) > 1024 * 1024 or size > 16 * 1024 * 1024:
                 raise FleetError("protocol", "Native event stream exceeded bounded limits")
@@ -305,19 +319,7 @@ def supervise(rid, generation):
                 portal.complete_native()
             if len(result.output.encode()) > MAX_ARTIFACT:
                 raise FleetError("protocol", "Native final output exceeds the bounded limit")
-            with s.transaction() as c:
-                current = s.get(rid, c)
-                if current["generation"] != generation or current["status"] != "running":
-                    raise FleetError("generation", "Supervisor was fenced")
-                if result.session_id:
-                    current["session_id"] = result.session_id
-                current["updated_at"] = time.time()
-                s.save(
-                    c,
-                    current,
-                    "progress",
-                    {"type": str(event.get("type", event.get("event", "unknown")))[:80]},
-                )
+            progress.submit(str(event.get("type", event.get("event", "unknown")))[:80], result.session_id)
         code = process.wait()
         if portal is not None and portal.bridge_instance and portal.bridge_receipt is None:
             failure = "delegation_transport"
@@ -325,18 +327,27 @@ def supervise(rid, generation):
             failure = result.failure or "no_final_output"
         elif not failure:
             failure = result.failure
+        if not failure:
+            progress.finish()
     except (Exception, KeyboardInterrupt) as e:
         failure = e.code if isinstance(e, FleetError) else "execution"
     finally:
         stopped.set()
+        if lines is not None:
+            lines.close()
+        if progress is not None:
+            progress.cancel()
         if portal is not None:
             portal.close()
+        progress_settled = progress is None or progress.join()
+        if not progress_settled:
+            failure = "progress_uncertain"
         # Child exit does not prove descendant cleanup. Keep capacity on uncertainty.
         current = s.get(rid)
         if current["generation"] != generation:
             return 2
         remote_clean = m._cleanup_box(current)
-        clean = processes.terminate(current) and remote_clean
+        clean = processes.terminate(current) and remote_clean and progress_settled
         if process is not None:
             try:
                 process.wait(timeout=1)

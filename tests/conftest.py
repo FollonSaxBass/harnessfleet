@@ -44,6 +44,8 @@ if 'mode:malformed' in task:
 if 'mode:quota' in task or 'mode:auth' in task:
     emit({'type':'turn.failed','error':{'code':'quota_exceeded' if 'mode:quota' in task else 'authentication_error'}})
     raise SystemExit(1)
+if 'mode:progress-burst' in task:
+    for number in range(300):emit({'type':f'fixture.{number}'})
 if 'mode:recursive' in task:
     cli=[sys.executable,'-m','harnessfleet','run','start','--route','claude-local','--model','model-b','mode:leaf']
     p=subprocess.run(cli,capture_output=True,text=True)
