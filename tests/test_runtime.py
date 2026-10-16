@@ -297,3 +297,48 @@ def test_mount_plan_uses_only_declared_file_descriptors(synthetic_runtime):
         assert command[-6:] == ["/usr/bin/python3", "-I", "-S", "-c", BOOTSTRAP, "pass"]
     finally:
         prepared.close()
+
+
+@pytest.mark.parametrize("bounded_total", [False, True])
+def test_restored_source_uses_sealed_size_for_archive_and_total(
+    synthetic_runtime, monkeypatch, bounded_total
+):
+    from harnessfleet import runtime
+
+    files, _, _ = synthetic_runtime
+    selected = files[-1]
+    approved = Path(selected.source).read_bytes()
+    approved_total = sum(Path(item.source).stat().st_size for item in files)
+    alias = Path(selected.source).with_name("preopened-writer")
+    os.link(selected.source, alias)
+    writer = os.open(alias, os.O_RDWR)
+    target = os.fstat(writer)
+    os.ftruncate(writer, 1)
+    original_seal = runtime.seal_file
+
+    def restore_then_seal(descriptor, expected):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+            os.pwrite(writer, approved, 0)
+            os.ftruncate(writer, len(approved))
+        return original_seal(descriptor, expected)
+
+    monkeypatch.setattr(runtime, "seal_file", restore_then_seal)
+    if bounded_total:
+        monkeypatch.setattr(runtime, "MAX_TOTAL", approved_total - 1)
+    prepared = None
+    try:
+        if bounded_total:
+            with pytest.raises(FleetError):
+                prepared = prepare_runtime(RuntimeManifest(tuple(files)))
+        else:
+            prepared = prepare_runtime(RuntimeManifest(tuple(files)))
+            descriptor = dict(prepared.mounts)["/usr/lib/python312.zip"]
+            with zipfile.ZipFile(
+                io.BytesIO(os.pread(descriptor, os.fstat(descriptor).st_size, 0))
+            ) as archive:
+                assert archive.read(selected.guest) == approved
+    finally:
+        if prepared is not None:
+            prepared.close()
+        os.close(writer)

@@ -291,15 +291,17 @@ def prepare_runtime(manifest):
             for item in sorted(manifest.files, key=lambda item: item.guest):
                 source = _safe_source(item.source)
                 try:
-                    size = os.fstat(source).st_size
-                    total += size
-                    if total > MAX_TOTAL:
-                        raise _failure()
                     descriptor = seal_file(source, item.sha256)
                 finally:
                     os.close(source)
                 temporary.append(descriptor)
+                size = os.fstat(descriptor).st_size
+                total += size
+                if total > MAX_TOTAL:
+                    raise _failure()
                 data = os.pread(descriptor, size, 0)
+                if len(data) != size:
+                    raise _failure()
                 if item.role == "stdlib":
                     entry = zipfile.ZipInfo(item.guest, date_time=(1980, 1, 1, 0, 0, 0))
                     entry.external_attr = 0o100444 << 16
