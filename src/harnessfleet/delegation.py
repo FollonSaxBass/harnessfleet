@@ -111,7 +111,10 @@ class Client:
                         if self.cancelled is not None:
                             if self.cancelled.is_set():
                                 code = "request_uncertain" if operation in MUTATIONS else "cancelled"
-                                raise FleetError(code, f"Wait cancelled for request {request_id}; admitted work is unchanged")
+                                raise FleetError(
+                                    code,
+                                    f"Wait cancelled for request {request_id}; admitted work is unchanged",
+                                )
                             remaining = deadline - time.monotonic()
                             if remaining <= 0:
                                 raise TimeoutError()
@@ -129,7 +132,9 @@ class Client:
                 return response["result"]
             except (OSError, ValueError, KeyError, TypeError):
                 raise FleetError(
-                    "request_uncertain" if attempted_send and operation in MUTATIONS else "delegation_transport",
+                    "request_uncertain"
+                    if attempted_send and operation in MUTATIONS
+                    else "delegation_transport",
                     f"Delegation response unavailable; request {request_id} may be consumed. Reuse only this request id; never replay with a new id.",
                 )
 
@@ -306,8 +311,16 @@ class Portal:
 
                 self.bridge_monitor = threading.Thread(target=watch, daemon=True)
                 self.bridge_monitor.start()
-        return {"schema_version": 1, "result": {"schema_version": 1, "cwd": parent["cwd"],
-                "run": self.rid, "generation": self.generation, "bridge_instance": self.bridge_instance}}
+        return {
+            "schema_version": 1,
+            "result": {
+                "schema_version": 1,
+                "cwd": parent["cwd"],
+                "run": self.rid,
+                "generation": self.generation,
+                "bridge_instance": self.bridge_instance,
+            },
+        }
 
     def respond(self, packet, writer):
         try:
@@ -345,10 +358,13 @@ class Portal:
 
         def live():
             try:
-                return (not self.closed and self.native_handle is not None
-                        and not select.select([handle, self.native_handle], [], [], 0)[0]
-                        and processes.receipt(pid) == peer
-                        and processes.descendant(pid, self.native_receipt))
+                return (
+                    not self.closed
+                    and self.native_handle is not None
+                    and not select.select([handle, self.native_handle], [], [], 0)[0]
+                    and processes.receipt(pid) == peer
+                    and processes.descendant(pid, self.native_receipt)
+                )
             except (OSError, ValueError):
                 return False
 
@@ -368,17 +384,27 @@ class Portal:
                 raise FleetError("request", "Invalid bridge registration")
             return self._register_bridge(parent, writer, kwargs)
         if self.bridge_instance and (
-            self.bridge_receipt != peer or self.bridge_handle is None
+            self.bridge_receipt != peer
+            or self.bridge_handle is None
             or select.select([self.bridge_handle], [], [], 0)[0]
         ):
             raise FleetError("delegation_auth", "Only the registered bridge may use this generation")
         manager = copy.copy(self.manager)
-        manager._principal = {"id": self.rid, "generation": self.generation,
-                              "token": parent["child_token"], "live": live}
+        manager._principal = {
+            "id": self.rid,
+            "generation": self.generation,
+            "token": parent["child_token"],
+            "live": live,
+        }
         if self.bridge_instance:
-            manager._principal["actor"] = {"kind": "stdio_bridge", "id": self.bridge_instance,
-                "run": self.rid, "generation": self.generation,
-                "exact_native_caller": None, "completeness": "partial"}
+            manager._principal["actor"] = {
+                "kind": "stdio_bridge",
+                "id": self.bridge_instance,
+                "run": self.rid,
+                "generation": self.generation,
+                "exact_native_caller": None,
+                "completeness": "partial",
+            }
         method = getattr(manager, operation)
         try:
             bound = inspect.signature(method).bind(*args, **kwargs)

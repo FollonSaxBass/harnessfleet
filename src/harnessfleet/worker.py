@@ -74,7 +74,9 @@ def native_lines(process, stderr_chunks, portal=None, completed=None):
                 if key.data == "bridge_failure":
                     monitor.unregister(key.fd)
                     if not exited and not completed():
-                        raise FleetError("delegation_transport", "Managed stdio helper exited; it will not be restarted")
+                        raise FleetError(
+                            "delegation_transport", "Managed stdio helper exited; it will not be restarted"
+                        )
             if exited:
                 if pending:
                     yield pending
@@ -190,28 +192,44 @@ def supervise(rid, generation):
                         import uuid
 
                         run["bridge_instance"] = uuid.uuid4().hex
-                    portal = Portal(m, rid, generation, bridge_instance=run.get("bridge_instance") if stdio else None)
+                    portal = Portal(
+                        m, rid, generation, bridge_instance=run.get("bridge_instance") if stdio else None
+                    )
                     if stdio:
                         from pathlib import Path
 
                         launcher = Path(__file__).with_name("managed_stdio.py").resolve()
                         if not launcher.is_file():
-                            raise FleetError("delegation_transport", "Installed managed stdio helper is unavailable")
+                            raise FleetError(
+                                "delegation_transport", "Installed managed stdio helper is unavailable"
+                            )
                         home = Path(portal.directory.name) / "home"
                         home.mkdir(mode=0o700)
                         bridge_env = {
-                            **portal.environment(), "HOME": str(home), "XDG_CONFIG_HOME": str(home),
-                            "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-                            "HARNESSFLEET_PARENT_RUN": rid, "HARNESSFLEET_PARENT_GENERATION": str(generation),
+                            **portal.environment(),
+                            "HOME": str(home),
+                            "XDG_CONFIG_HOME": str(home),
+                            "PATH": "/usr/bin:/bin",
+                            "LANG": "C.UTF-8",
+                            "HARNESSFLEET_PARENT_RUN": rid,
+                            "HARNESSFLEET_PARENT_GENERATION": str(generation),
                             "HARNESSFLEET_PARENT_TOKEN": run["child_token"],
                             "HARNESSFLEET_BRIDGE_INSTANCE": run["bridge_instance"],
                             "HARNESSFLEET_EXECUTION": marker,
                         }
-                        run["_mcp_servers"] = {"harnessfleet": {
-                            "command": sys.executable, "args": ["-I", str(launcher)], "cwd": run["cwd"],
-                            "env": bridge_env, "env_vars": [], "required": True, "enabled_tools": ["run"],
-                            "default_tools_approval_mode": "approve", "tool_timeout_sec": 130,
-                        }}
+                        run["_mcp_servers"] = {
+                            "harnessfleet": {
+                                "command": sys.executable,
+                                "args": ["-I", str(launcher)],
+                                "cwd": run["cwd"],
+                                "env": bridge_env,
+                                "env_vars": [],
+                                "required": True,
+                                "enabled_tools": ["run"],
+                                "default_tools_approval_mode": "approve",
+                                "tool_timeout_sec": 130,
+                            }
+                        }
                     else:
                         native_env.update(portal.environment(), HARNESSFLEET_PARENT_TOKEN=run["child_token"])
                 command = adapter.command(run, str(directory))

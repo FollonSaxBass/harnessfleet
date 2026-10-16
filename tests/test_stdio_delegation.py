@@ -8,7 +8,7 @@ import pytest
 from harnessfleet import FleetError
 
 
-MCP = r'''
+MCP = r"""
 if 'mode:stdio' in task:
     import tomllib
     settings=next(tomllib.loads(value)['mcp_servers'] for value in args if value.startswith('mcp_servers='))
@@ -69,7 +69,7 @@ if 'mode:stdio' in task:
         helper.stdin.close();helper.wait(timeout=5)
     raise SystemExit(0)
 elif 'mode:recursive' in task:
-'''
+"""
 
 
 @pytest.fixture
@@ -189,4 +189,3 @@ def test_malformed_transport_authorization_does_not_broaden_policy(instance):
     with pytest.raises(FleetError) as error:
         instance.m.routes()
     assert error.value.code == "configuration"
-
