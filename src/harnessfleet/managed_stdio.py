@@ -122,6 +122,7 @@ class _Server:
         self.cwd = cwd
         self.retired = threading.Event()
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
         self.calls = {}
         self.slots = threading.BoundedSemaphore(2)
         self.follower = threading.BoundedSemaphore(1)
@@ -147,7 +148,7 @@ class _Server:
         if len(payload) > MAX_RESPONSE:
             raise FleetError("output", "MCP response exceeds its limit")
         deadline = time.monotonic() + DEADLINE
-        if not self.lock.acquire(timeout=DEADLINE):
+        if not self.write_lock.acquire(timeout=DEADLINE):
             self.retired.set()
             return
         try:
@@ -163,7 +164,7 @@ class _Server:
         except OSError:
             self.retired.set()
         finally:
-            self.lock.release()
+            self.write_lock.release()
 
     def rpc_error(self, rid, code, message):
         self.write({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
@@ -335,7 +336,7 @@ class _Server:
         except (ValueError, TypeError, RecursionError):
             self.tool_result(rid, error=error_record("request", "Invalid run arguments"))
             return
-        if self.retired.is_set():
+        if self.retired.is_set() or self.shutdown_requested:
             return
         if not self.slots.acquire(blocking=False):
             self.tool_result(
@@ -348,6 +349,11 @@ class _Server:
             return
         cancelled = threading.Event()
         with self.lock:
+            if self.retired.is_set() or self.shutdown_requested:
+                if operation == "follow":
+                    self.follower.release()
+                self.slots.release()
+                return
             self.calls[rid] = cancelled
         self.jobs.put_nowait((rid, operation, arguments, request_id, cancelled))
 
@@ -377,7 +383,7 @@ class _Server:
                 if not buffer:
                     partial_since = time.monotonic()
                 buffer.extend(chunk)
-                while b"\n" in buffer:
+                while b"\n" in buffer and not self.shutdown_requested:
                     line, _, rest = buffer.partition(b"\n")
                     buffer = bytearray(rest)
                     if len(line) + 1 > MAX_REQUEST:
@@ -402,7 +408,7 @@ class _Server:
             with self.lock:
                 for event in self.calls.values():
                     event.set()
-        return 0 if eof and not buffer else 2
+        return 0 if self.shutdown_requested or (eof and not buffer) else 2
 
 
 def _retire():

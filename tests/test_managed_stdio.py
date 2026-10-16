@@ -65,6 +65,13 @@ class Client:
             return dict(operation=operation, arguments=kwargs)
         return call
 helper.Client = Client
+if os.environ.get("HF_PROTO_SHUTDOWN_FRAME"):
+    original = helper._Server.dispatch
+    def shutdown_after_frame(server, packet):
+        original(server, packet)
+        if packet.get("id") == 99:
+            os.kill(os.getpid(), 15)
+    helper._Server.dispatch = shutdown_after_frame
 sys.exit(helper.serve())
 """
 
@@ -456,3 +463,30 @@ def test_native_sigterm_uses_bounded_graceful_retirement(launch, blocked):
     wire.initialize()
     wire.process.send_signal(signal.SIGTERM)
     assert wire.process.wait(timeout=7) == (2 if blocked else 0)
+
+
+def test_sigterm_discards_unfinished_frame_without_dispatch(launch):
+    wire = launch()
+    wire.initialize()
+    wire.raw(b'{"jsonrpc":"2.0","id":99,"method":"ping"}\n{"jsonrpc":')
+    assert wire.recv()["id"] == 99
+    wire.process.send_signal(signal.SIGTERM)
+    assert wire.process.wait(timeout=7) == 0
+
+
+def test_sigterm_stops_dispatch_of_remaining_buffered_frames(launch):
+    wire = launch({"HF_PROTO_SHUTDOWN_FRAME": "1"})
+    wire.initialize()
+    wire.raw(b'{"jsonrpc":"2.0","id":99,"method":"ping"}\n{"jsonrpc":"2.0","id":100,"method":"ping"}\n')
+    assert wire.recv()["id"] == 99
+    assert wire.process.wait(timeout=3) == 0
+    assert wire.buffer + wire.process.stdout.read() == b""
+
+
+def test_sigterm_does_not_wait_for_stdout_backpressure(launch):
+    wire = launch()
+    wire.initialize()
+    wire.call(arguments={"behavior": "backpressure"})
+    assert select.select([wire.process.stdout], [], [], 3)[0]
+    wire.process.send_signal(signal.SIGTERM)
+    assert wire.process.wait(timeout=1) == 0
