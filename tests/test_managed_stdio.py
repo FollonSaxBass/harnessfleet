@@ -21,6 +21,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+import signal
 sys.path.insert(0, sys.argv[1])
 from harnessfleet import managed_stdio as helper
 from harnessfleet.contracts import FleetError
@@ -66,6 +67,8 @@ class Client:
             return dict(operation=operation, arguments=kwargs)
         return call
 helper.Client = Client
+if os.environ.get("HF_PROTO_BLOCK_SIGTERM"):
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
 if os.environ.get("HF_PROTO_SHUTDOWN_FRAME") or os.environ.get("HF_PROTO_NOTIFY_FRAME"):
     original = helper._Server.dispatch
     def shutdown_after_frame(server, packet):
@@ -503,5 +506,12 @@ def test_sigterm_interrupts_main_thread_stdout_backpressure(launch):
     wire.raw(b'{"jsonrpc":"2.0","id":99,"method":"ping"}\n{"jsonrpc":"2.0","id":100,"method":"ping"}\n')
     assert select.select([wire.process.stderr], [], [], 3)[0]
     assert wire.process.stderr.readline() == b"fixture dispatch100\n"
+    wire.process.send_signal(signal.SIGTERM)
+    assert wire.process.wait(timeout=1) == 0
+
+
+def test_sigterm_is_not_disabled_by_an_inherited_mask(launch):
+    wire = launch({"HF_PROTO_BLOCK_SIGTERM": "1"})
+    wire.initialize()
     wire.process.send_signal(signal.SIGTERM)
     assert wire.process.wait(timeout=1) == 0

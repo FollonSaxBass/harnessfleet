@@ -458,10 +458,12 @@ def serve():
     try:
         server = _Server(registration["cwd"])
         previous = signal.signal(signal.SIGTERM, lambda *_: server.request_shutdown())
+        previous_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         try:
             result = server.run()
             return result if result else (0 if _retire() else 2)
         finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             signal.signal(signal.SIGTERM, previous)
             os.close(server.wakeup_read)
             os.close(server.wakeup_write)
