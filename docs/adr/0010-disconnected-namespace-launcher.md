@@ -12,20 +12,48 @@ Its version-1 LaunchSpec is an internal experiment, not a public execution recor
 
 ## Deliberately narrow runtime
 
-The caller explicitly selects the administrator-owned system `/usr` tree as a
-read-only runtime and an absolute executable within it. The loader compatibility
-links, private proc/dev and ephemeral home/tmp/run/work directories are fixed.
-There are no host-writable mounts, account files, project trees, artifacts or
-delegation endpoints. Network access is disabled. The launcher receives a fixed
-environment; the payload receives only explicit locale and `HF_` metadata plus
-fixed home/path/tmp settings. No ambient account or control-plane environment is
-inherited. A hostile worker cannot poison trusted host code through a writable
-alias when no host-writable path is exposed.
+The trusted controller supplies a versioned `RuntimeManifest` with exact source
+paths, guest paths, roles and expected SHA-256 hashes. Only CPython 3.12 on Linux
+x86_64 is admitted. `LaunchSpec` carries Python source, not an arbitrary command.
+This is an operating-system boundary, not a Python language sandbox: payloads may
+use native extensions and ctypes within the namespace and syscall restrictions.
+
+Every selected source and ancestor is opened through directory descriptors without
+following symlinks. Sources must be regular, root-owned files without group/other
+write or set-id bits. Preparation bounds the source count, individual and total
+bytes and archive size. It copies from the same opening, checks before/after
+metadata and the expected digest, then applies and verifies WRITE, GROW, SHRINK and
+SEAL memfd seals. Metadata alone does not prove atomicity. The expected digest
+checks the copied bytes; seals prevent later mutation through host hardlinks or
+preopened writable descriptors. No runtime discovery, hash enrollment or implicit
+trust in hashes generated from the current host is provided.
+
+Preparation completes before process creation. Only sealed files are exposed with
+Bubblewrap `--ro-bind-data`; no host directory is bound. ELF validation admits a
+narrow declared ELF64 little-endian x86_64 closure, an exact loader and unambiguous
+declared dependencies. It rejects RPATH/RUNPATH and unsupported audit/filter/config
+loading mechanisms, without invoking `ldd`, the interpreter or source executables.
+It is not a general dynamic-library resolver. Runtime extensions and any optional
+dynamic dependencies must be selected explicitly.
+
+Pure-Python standard-library sources form a deterministic ZIP_STORED archive at
+`/usr/lib/python312.zip`. Compiled extensions remain separate sealed files. Archive
+members exclude traversal, absolute paths, bytecode, customization and site-package
+locations. Bootstrap and payload run with `-I -S`, ignoring ambient Python options
+and disabling site initialization. Locale is C and timezone UTC. There are no host
+NSS, certificate, timezone or locale configuration files.
+
+Fixed guest compatibility links and private proc/dev accompany ephemeral
+home/tmp/run/work directories. There are no host-writable mounts, account files,
+project trees, artifacts or delegation endpoints. Network access is disabled.
+The payload receives only explicit `HF_` metadata and fixed home/path/tmp/locale
+settings. The host Bubblewrap binary and its host loader remain trusted parts of
+the controller environment; they are distinct from the sealed guest runtime.
 
 Mandatory user, mount, PID, network, IPC and UTS namespaces have no permissive
 fallback. Additional user namespaces are disabled. Capabilities are dropped and
 Bubblewrap sets no-new-privileges. This experiment requires Linux x86_64, rootless
-non-setuid Bubblewrap, the system Python bootstrap and compatible system layout.
+non-setuid Bubblewrap, an explicitly pinned compatible CPython runtime.
 Other architectures and incomplete manifests are rejected.
 
 The trusted Bubblewrap reaper stays PID1. The payload is a distinct process;
@@ -75,6 +103,15 @@ ownership-read failure, detached re-exec, namespace-init/native/launcher death a
 supervisor death during startup or execution. Alternate syscall ABIs are rejected
 by the kernel filter. Tests explicitly skip unavailable prerequisites; a skip is
 not qualification. Current local evidence uses Bubblewrap 0.9.0 on Linux x86_64/WSL.
+
+Runtime unit tests use synthetic ELF metadata and injected root-ownership metadata,
+with real copying, hardlinks, descriptor lifetime and kernel seals. They do not
+certify an executable runtime. Actual kernel tests require a separately approved
+manifest via `HF_BOUNDARY_RUNTIME_MANIFEST` and its exact SHA-256 via
+`HF_BOUNDARY_RUNTIME_SHA256`. Without both, those cases explicitly skip. The fixture
+does not generate or bless a host manifest. Kernel qualification must record the
+chosen file provenance and manifest hash outside the public repository. A passing
+unit suite or a prerequisite skip cannot replace that execution proof.
 
 This does not qualify native accounts, adapter diagnostics, persistent project or
 credential mounts, model connectivity, broker identity across PID namespaces,

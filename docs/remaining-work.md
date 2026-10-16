@@ -26,7 +26,7 @@ behavior, separate from the feature work above.
 
 
 An internal disconnected namespace launcher now provides the first executable
-slice of the registry-protection work. It has a read-only system runtime,
+slice of the registry-protection work. It has a narrow, hash-pinned and sealed CPython runtime,
 ephemeral writable paths, no host credentials/projects/broker and no networking.
 It does not change Route/adapter support or enable RunManager isolation. See
 [ADR 10](adr/0010-disconnected-namespace-launcher.md) for kernel evidence and the

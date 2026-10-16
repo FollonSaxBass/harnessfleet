@@ -1,6 +1,6 @@
 """Internal, disconnected namespace-launcher experiment. No adapter support implied.
 
-Only a system /usr runtime is mounted, read-only. All writable paths are ephemeral.
+Only explicit hash-pinned runtime snapshots are mounted. Writable paths are ephemeral.
 There are no host project, credential, artifact or broker mounts and no networking.
 """
 
@@ -22,6 +22,7 @@ import time
 
 from . import processes
 from .contracts import FleetError
+from .runtime import RuntimeManifest, prepare_runtime
 
 READY = b"harnessfleet-boundary-ready-v1\n"
 BOOTSTRAP = """
@@ -31,14 +32,14 @@ if os.read(0,1)!=b'\\x01':raise SystemExit(125)
 fd=os.open('/dev/null',os.O_RDONLY)
 os.dup2(fd,0)
 os.close(fd)
-os.execve(sys.argv[1],sys.argv[1:],dict(os.environ))
+os.execve('/usr/bin/python3',['python3','-I','-S','-c',sys.argv[1]],dict(os.environ))
 """
 
 
 @dataclass(frozen=True)
 class LaunchSpec:
-    argv: tuple[str, ...]
-    runtime_root: str
+    code: str
+    runtime: RuntimeManifest
     environment: dict[str, str] = field(default_factory=dict)
     network: str = "none"
     version: int = 1
@@ -79,15 +80,10 @@ def _validate(spec):
     if (
         spec.version != 1
         or type(spec.version) is not int
-        or spec.runtime_root != "/usr"
         or spec.network != "none"
-        or not isinstance(spec.argv, tuple)
-        or not spec.argv
-        or any(not isinstance(value, str) or "\0" in value for value in spec.argv)
-        or sum(map(len, spec.argv)) > 256 * 1024
-        or not Path(spec.argv[0]).is_absolute()
-        or not Path(spec.argv[0]).is_relative_to("/usr")
-        or ".." in Path(spec.argv[0]).parts
+        or not isinstance(spec.code, str)
+        or "\0" in spec.code
+        or len(spec.code) > 128 * 1024
         or not isinstance(spec.environment, dict)
         or len(spec.environment) > 64
     ):
@@ -97,25 +93,16 @@ def _validate(spec):
             not isinstance(key, str)
             or not key.isascii()
             or not key.isidentifier()
-            or (key not in {"LANG", "LC_ALL", "TZ"} and not key.startswith("HF_"))
+            or not key.startswith("HF_")
             or not isinstance(value, str)
             or "\0" in value
             or len(value) > 4096
         ):
             raise FleetError("boundary_manifest", "Unsupported environment in boundary manifest")
     try:
-        runtime = _trusted_path(Path(spec.runtime_root), directory=True)
-        executable = _trusted_path(Path(spec.argv[0]))
-        _trusted_path(Path("/usr/bin/python3"))
-        launcher = _trusted_path(Path("/usr/bin/bwrap"))
-        if runtime != Path("/usr") or not executable.is_relative_to(runtime):
-            raise FleetError("boundary_manifest", "Executable is outside boundary runtime manifest")
-        for library in ("/usr/lib", "/usr/lib64", "/usr/bin"):
-            if not Path(library).resolve(strict=True).is_relative_to(runtime):
-                raise FleetError("boundary_manifest", "Unsupported runtime layout in boundary manifest")
+        return str(_trusted_path(Path("/usr/bin/bwrap")))
     except (OSError, ValueError):
-        raise FleetError("boundary_manifest", "Unavailable runtime in boundary manifest") from None
-    return str(launcher)
+        raise FleetError("boundary_manifest", "Unavailable launcher in boundary manifest") from None
 
 
 def _seccomp():
@@ -340,74 +327,88 @@ def _information(fd, deadline):
     raise FleetError("boundary_startup", "Namespace startup receipt was not available")
 
 
+def _command(spec, launcher, mounts, info_write, block_read, seccomp):
+    command = [
+        launcher,
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-net",
+        "--unshare-uts",
+        "--disable-userns",
+        "--assert-userns-disabled",
+        "--die-with-parent",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--dir",
+        "/usr/bin",
+        "--symlink",
+        "python3.12",
+        "/usr/bin/python3",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/proc/1",
+        "--seccomp",
+        str(seccomp),
+    ]
+    for guest, descriptor in mounts:
+        command += ["--perms", "0555", "--ro-bind-data", str(descriptor), guest]
+    for directory in ("/tmp", "/home", "/run", "/work"):
+        command += ["--tmpfs", directory]
+    command += ["--chdir", "/work", "--clearenv"]
+    for key, value in {
+        "HOME": "/home",
+        "TMPDIR": "/tmp",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        **spec.environment,
+    }.items():
+        command += ["--setenv", key, value]
+    command += [
+        "--info-fd",
+        str(info_write),
+        "--block-fd",
+        str(block_read),
+        "--",
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "-c",
+        BOOTSTRAP,
+        spec.code,
+    ]
+    return command
+
+
 def launch(spec: LaunchSpec, *, startup_timeout=5) -> ExecutionHandle:
     deadline = _deadline(startup_timeout)
     launcher = _validate(spec)
     processes.require_linux()
     if platform.machine() != "x86_64":
         raise FleetError("boundary_platform", "Boundary syscall policy requires Linux x86_64")
+    prepared = prepare_runtime(spec.runtime)
     info_read = info_write = block_read = block_write = seccomp = None
     handle = None
     try:
         info_read, info_write = os.pipe2(os.O_CLOEXEC)
         block_read, block_write = os.pipe2(os.O_CLOEXEC)
         seccomp = _seccomp()
-        command = [
-            launcher,
-            "--unshare-user",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-net",
-            "--unshare-uts",
-            "--disable-userns",
-            "--assert-userns-disabled",
-            "--die-with-parent",
-            "--new-session",
-            "--cap-drop",
-            "ALL",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/proc/1",
-            "--seccomp",
-            str(seccomp),
-        ]
-        for directory in ("/tmp", "/home", "/run", "/work"):
-            command += ["--tmpfs", directory]
-        command += ["--chdir", "/work", "--clearenv"]
-        for key, value in {
-            "HOME": "/home",
-            "TMPDIR": "/tmp",
-            "PATH": "/usr/bin:/bin",
-            **spec.environment,
-        }.items():
-            command += ["--setenv", key, value]
-        command += [
-            "--info-fd",
-            str(info_write),
-            "--block-fd",
-            str(block_read),
-            "--",
-            "/usr/bin/python3",
-            "-I",
-            "-c",
-            BOOTSTRAP,
-            *spec.argv,
-        ]
+        command = _command(spec, launcher, prepared.mounts, info_write, block_read, seccomp)
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -415,7 +416,7 @@ def launch(spec: LaunchSpec, *, startup_timeout=5) -> ExecutionHandle:
             stderr=subprocess.PIPE,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
             close_fds=True,
-            pass_fds=(info_write, block_read, seccomp),
+            pass_fds=(info_write, block_read, seccomp, *(descriptor for _, descriptor in prepared.mounts)),
             start_new_session=True,
         )
         handle = ExecutionHandle(process, info_read, block_write)
@@ -450,6 +451,7 @@ def launch(spec: LaunchSpec, *, startup_timeout=5) -> ExecutionHandle:
                 error.cleanup_uncertain = True
         raise error from cause
     finally:
+        prepared.close()
         for descriptor in (info_read, info_write, block_read, block_write, seccomp):
             if descriptor is not None:
                 os.close(descriptor)

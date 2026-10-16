@@ -18,10 +18,15 @@ import pytest
 
 from harnessfleet import FleetError, processes
 from harnessfleet.boundary import LaunchSpec, launch
+from harnessfleet.runtime import RuntimeManifest
+from runtime_fixture import pinned_runtime
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def kernel_boundary():
+    manifest = pinned_runtime()
+    if manifest is None:
+        pytest.skip("No explicit hash-pinned runtime fixture supplied; kernel backend is unqualified")
     if sys.platform != "linux" or platform.machine() != "x86_64" or not shutil.which("bwrap"):
         pytest.skip("Linux x86_64 and rootless Bubblewrap are required for kernel qualification")
     if not shutil.which("unshare") or Path("/usr/bin/bwrap").stat().st_mode & stat.S_ISUID:
@@ -47,33 +52,31 @@ def kernel_boundary():
     help_text = subprocess.check_output(["/usr/bin/bwrap", "--help"], text=True)
     if "--assert-userns-disabled" not in help_text:
         pytest.skip("Bubblewrap lacks the required user-namespace restriction")
-    handle = launch(LaunchSpec(("/usr/bin/true",), runtime_root="/usr"))
+    handle = launch(LaunchSpec("pass", runtime=manifest))
     try:
         assert handle.wait(5).cleanup_confirmed
     finally:
         assert handle.terminate(5).cleanup_confirmed
         handle.close()
+    return manifest
 
 
 @pytest.mark.parametrize(
     "change",
     [
-        {"runtime_root": "/"},
-        {"runtime_root": "/home"},
-        {"argv": ("python3", "-c", "pass")},
-        {"argv": ("/tmp/payload",)},
+        {"code": None},
+        {"code": "\0"},
+        {"code": "x" * (128 * 1024 + 1)},
         {"network": "host"},
         {"version": 2},
         {"environment": {"HOME": "/host"}},
         {"environment": {"LD_PRELOAD": "/usr/lib/override.so"}},
+        {"environment": {"LANG": "custom"}},
     ],
 )
 def test_unsupported_manifest_is_rejected_before_payload(change, tmp_path):
     marker = tmp_path / "must-not-exist"
-    spec = {
-        "argv": ("/usr/bin/python3", "-I", "-c", f"open({str(marker)!r},'w').write('effect')"),
-        "runtime_root": "/usr",
-    }
+    spec = {"code": f"open({str(marker)!r},'w').write('effect')", "runtime": RuntimeManifest(())}
     spec.update(change)
     with pytest.raises(FleetError, match="manifest"):
         launch(LaunchSpec(**spec))
@@ -95,7 +98,7 @@ def test_real_kernel_denies_host_state_process_ipc_and_fds(kernel_boundary, tmp_
     fd = os.open(secret, os.O_RDONLY)
     os.set_inheritable(fd, True)
     payload = r"""
-import ctypes,json,os,socket
+import ctypes,json,os,socket,sys
 from pathlib import Path
 target=Path(TARGET)
 def denied(action):
@@ -136,6 +139,10 @@ result={
  'process_vm_filter_enforced':vm_denied,
  'positive_work':Path('/work/positive').read_text()=='allowed',
  'runtime_read':Path('/usr/bin/python3').exists(),
+ 'no_site':'site' not in sys.modules and 'sitecustomize' not in sys.modules,
+ 'narrow_runtime':not any(Path(p).exists() for p in ('/usr/share','/usr/bin/true','/etc/ld.so.cache','/usr/lib/python3.12/site-packages')),
+ 'stdlib_from_zip':__import__('json').__file__.startswith('/usr/lib/python312.zip/'),
+ 'fixed_locale':os.environ.get('LC_ALL')=='C' and os.environ.get('TZ')=='UTC',
  'explicit_environment':os.environ.get('HF_BOUNDARY_CASE')=='explicit',
  'capabilities_dropped':next(x for x in Path('/proc/self/status').read_text().splitlines() if x.startswith('CapEff:')).split()[1]=='0000000000000000',
  'no_new_privileges':next(x for x in Path('/proc/self/status').read_text().splitlines() if x.startswith('NoNewPrivs:')).split()[1]=='1',
@@ -152,8 +159,8 @@ print(json.dumps(result),flush=True)
     try:
         handle = launch(
             LaunchSpec(
-                ("/usr/bin/python3", "-I", "-c", payload),
-                runtime_root="/usr",
+                payload,
+                runtime=kernel_boundary,
                 environment={"HF_BOUNDARY_CASE": "explicit"},
             )
         )
@@ -188,7 +195,7 @@ if os.fork()==0:
     os.execve('/usr/bin/python3',['python3','-I','-c',"import time;print('ready',flush=True);time.sleep(60)"],{})
 time.sleep(60)
 """
-    handle = launch(LaunchSpec(("/usr/bin/python3", "-I", "-c", payload), runtime_root="/usr"))
+    handle = launch(LaunchSpec(payload, runtime=kernel_boundary))
     child_fd = None
     try:
         assert select.select([handle.process.stdout], [], [], 5)[0]
@@ -238,7 +245,7 @@ def test_ownership_failure_retains_blocked_payload_until_explicit_reconciliation
 
     monkeypatch.setattr(processes, "pidfd_open", exhausted)
     with pytest.raises(FleetError) as caught:
-        launch(LaunchSpec(("/usr/bin/echo", "must-not-execute"), runtime_root="/usr"))
+        launch(LaunchSpec("print('must-not-execute')", runtime=kernel_boundary))
     handle = caught.value.handle
     assert handle is not None
     try:
@@ -264,8 +271,14 @@ import errno,json,os,time
 from pathlib import Path
 from harnessfleet import FleetError,processes
 from harnessfleet.boundary import LaunchSpec,launch
+from harnessfleet.runtime import RuntimeFile,RuntimeManifest
+import hashlib
+raw=Path(os.environ["HF_BOUNDARY_RUNTIME_MANIFEST"]).read_bytes()
+assert hashlib.sha256(raw).hexdigest()==os.environ["HF_BOUNDARY_RUNTIME_SHA256"]
+data=json.loads(raw)
+runtime=RuntimeManifest(tuple(RuntimeFile(**f) for f in data["files"]))
 phase=PHASE
-spec=LaunchSpec(('/usr/bin/python3','-I','-c',"import ctypes,os,time;ctypes.CDLL(None).prctl(1,0,0,0,0);p=os.fork();os.setsid() if p==0 else None;print('ready',flush=True) if p else None;time.sleep(60)"),runtime_root='/usr')
+spec=LaunchSpec("import ctypes,os,time;ctypes.CDLL(None).prctl(1,0,0,0,0);p=os.fork();os.setsid() if p==0 else None;print('ready',flush=True) if p else None;time.sleep(60)",runtime=runtime)
 if phase=='blocked':
     original=processes.pidfd_open
     def unavailable(pid):
@@ -320,13 +333,7 @@ time.sleep(60)
 def test_compat_syscall_abi_is_rejected_by_kernel_filter(kernel_boundary):
     handle = launch(
         LaunchSpec(
-            (
-                "/usr/bin/python3",
-                "-I",
-                "-c",
-                "import ctypes;ctypes.CDLL(None).syscall(0x40000027);print('escaped')",
-            ),
-            runtime_root="/usr",
+            "import ctypes;ctypes.CDLL(None).syscall(0x40000027);print('escaped')", runtime=kernel_boundary
         )
     )
     try:
@@ -362,7 +369,7 @@ def test_identity_read_error_does_not_leak_untransferred_launcher_pidfd(kernel_b
 
     monkeypatch.setattr(processes, "receipt", unreadable)
     with pytest.raises(FleetError) as caught:
-        launch(LaunchSpec(("/usr/bin/echo", "must-not-execute"), runtime_root="/usr"))
+        launch(LaunchSpec("print('must-not-execute')", runtime=kernel_boundary))
     handle = caught.value.handle
     try:
         assert observed
