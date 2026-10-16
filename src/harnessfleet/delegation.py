@@ -266,6 +266,14 @@ class Portal:
         self.native_handle = processes.pidfd_open(record["pid"])
         self.native_receipt = record
 
+    def complete_native(self):
+        with self.bridge_lock:
+            if self.bridge_instance and (
+                self.bridge_handle is None or select.select([self.bridge_handle], [], [], 0)[0]
+            ):
+                raise FleetError("delegation_transport", "Managed helper was not alive at native completion")
+            self.native_completed.set()
+
     def close(self):
         with self.bridge_lock:
             self.closed = True

@@ -113,6 +113,16 @@ def test_stdio_child_relative_cwd_uses_recorded_parent_directory(stdio):
     assert json.loads(stdio.m.output(parent["id"])["text"])["cwd"] == str(stdio.path / "caller")
 
 
+@pytest.mark.parametrize("name", ["project-é", "project-🚀", "project-\x7f"])
+def test_stdio_accepts_unicode_working_directories(stdio, name):
+    directory = stdio.path / name
+    directory.mkdir()
+    parent = stdio.start("mode:stdio", cwd=str(directory))
+    assert stdio.finish(parent)["status"] == "finished"
+    result = json.loads(stdio.m.output(parent["id"])["text"])
+    assert result["verified"] and result["cwd"] == str(directory)
+
+
 def test_explicit_transport_authorization_keeps_origin_separate_from_child_selection(stdio):
     stdio.config["policy"]["delegation_transport"] = "experimental-unix-v1"
     stdio.config["policy"]["delegation_transports"] = ["experimental-unix-v1", "experimental-stdio-mcp-v1"]

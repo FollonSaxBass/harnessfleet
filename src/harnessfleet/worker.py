@@ -47,12 +47,12 @@ def native_lines(process, stderr_chunks, portal=None, completed=None):
     open_streams = {output_fd, error_fd}
 
     def check_bridge():
-        if (
-            portal is not None
-            and portal.failure_fd is not None
-            and not completed()
-            and select.select([portal.failure_fd], [], [], 0)[0]
-        ):
+        if portal is None or portal.failure_fd is None or completed():
+            return
+        handles = [portal.failure_fd]
+        if getattr(portal, "bridge_handle", None) is not None:
+            handles.append(portal.bridge_handle)
+        if select.select(handles, [], [], 0)[0]:
             raise FleetError("delegation_transport", "Managed stdio helper exited; it will not be restarted")
 
     try:
@@ -302,7 +302,7 @@ def supervise(rid, generation):
                 raise FleetError("protocol", "Native event is not an object")
             adapter.consume(event, result)
             if portal is not None and result.completed:
-                portal.native_completed.set()
+                portal.complete_native()
             if len(result.output.encode()) > MAX_ARTIFACT:
                 raise FleetError("protocol", "Native final output exceeds the bounded limit")
             with s.transaction() as c:

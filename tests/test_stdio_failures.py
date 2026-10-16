@@ -22,8 +22,14 @@ from harnessfleet.worker import native_lines
 
 
 @pytest.mark.parametrize("native_exited", [False, True])
-def test_helper_failure_precedes_buffered_native_final_output(native_exited):
+@pytest.mark.parametrize("delayed_notification", [False, True])
+def test_helper_failure_precedes_buffered_native_final_output(native_exited, delayed_notification):
     read, write = os.pipe()
+    helper = None
+    portal = SimpleNamespace(failure_fd=read, bridge_handle=None)
+    if delayed_notification:
+        helper = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"])
+        portal.bridge_handle = processes.pidfd_open(helper.pid)
     code = (
         "import sys,json;print(json.dumps({'type':'thread.started','thread_id':'synthetic'}),flush=True);"
         "sys.stdin.buffer.read(1);"
@@ -38,9 +44,13 @@ def test_helper_failure_precedes_buffered_native_final_output(native_exited):
     )
     try:
         result = Result()
-        lines = native_lines(process, [], SimpleNamespace(failure_fd=read), lambda: result.completed)
+        lines = native_lines(process, [], portal, lambda: result.completed)
         Codex().consume(json.loads(next(lines)), result)
-        os.write(write, b"helper failed first")
+        if helper is not None:
+            helper.kill()
+            helper.wait()
+        else:
+            os.write(write, b"helper failed first")
         process.stdin.write(b"x")
         process.stdin.flush()
         assert select.select([process.stdout], [], [], 3)[0]
@@ -62,6 +72,11 @@ def test_helper_failure_precedes_buffered_native_final_output(native_exited):
             stream.close()
         os.close(read)
         os.close(write)
+        if helper is not None:
+            if helper.poll() is None:
+                helper.kill()
+            helper.wait()
+            os.close(portal.bridge_handle)
 
 
 def test_cancelled_followers_release_real_broker_capacity_without_stopping_child(instance, monkeypatch):

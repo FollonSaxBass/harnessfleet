@@ -23,10 +23,10 @@ AUTH_KEYS = (
 def inline_toml(value):
     """Encode the owned stdio configuration without interpolating native TOML."""
     if isinstance(value, dict):
-        return "{" + ",".join(json.dumps(k) + "=" + inline_toml(v) for k, v in value.items()) + "}"
+        return "{" + ",".join(inline_toml(k) + "=" + inline_toml(v) for k, v in value.items()) + "}"
     if isinstance(value, list):
         return "[" + ",".join(inline_toml(v) for v in value) + "]"
-    return json.dumps(value, ensure_ascii=True, allow_nan=False)
+    return json.dumps(value, ensure_ascii=False, allow_nan=False).replace("\x7f", "\\u007f")
 
 
 class Base:

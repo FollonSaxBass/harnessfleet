@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -447,3 +448,11 @@ def test_eof_retirement_has_a_bounded_deadline(launch):
     wire.initialize()
     wire.process.stdin.close()
     assert wire.process.wait(timeout=7) == 2
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_native_sigterm_uses_bounded_graceful_retirement(launch, blocked):
+    wire = launch({"HF_PROTO_RETIRE_WAIT": "1"} if blocked else None)
+    wire.initialize()
+    wire.process.send_signal(signal.SIGTERM)
+    assert wire.process.wait(timeout=7) == (2 if blocked else 0)

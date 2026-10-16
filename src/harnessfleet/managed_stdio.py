@@ -7,6 +7,7 @@ from pathlib import Path
 import queue
 import re
 import select
+import signal
 import sys
 import threading
 import time
@@ -127,6 +128,7 @@ class _Server:
         self.jobs = queue.Queue(maxsize=2)
         self.initialized = False
         self.ready = False
+        self.shutdown_requested = False
         self.out = sys.stdout.fileno()
         os.set_blocking(self.out, False)
         for _ in range(2):
@@ -349,6 +351,9 @@ class _Server:
         eof = False
         try:
             while not self.retired.is_set():
+                if self.shutdown_requested:
+                    eof = True
+                    break
                 if partial_since is not None and time.monotonic() - partial_since >= DEADLINE:
                     break
                 if not select.select([fd], [], [], 0.1)[0]:
@@ -428,8 +433,13 @@ def serve():
         os.write(2, b"Managed stdio startup rejected\n")
         return 2
     try:
-        result = _Server(registration["cwd"]).run()
-        return result if result else (0 if _retire() else 2)
+        server = _Server(registration["cwd"])
+        previous = signal.signal(signal.SIGTERM, lambda *_: setattr(server, "shutdown_requested", True))
+        try:
+            result = server.run()
+            return result if result else (0 if _retire() else 2)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
     except Exception:
         os.write(2, b"Managed stdio transport retired\n")
         return 2

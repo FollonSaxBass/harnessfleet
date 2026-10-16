@@ -79,6 +79,13 @@ ancestry, fences obsolete generations and rejects replacement helpers. Helper lo
 before native completion fails the required-delegation run. Existing children retain
 their own lifecycle. Unknown cleanup retains capacity.
 
+EOF and native `SIGTERM` request a graceful shutdown. The helper cancels waiters
+and core fences further admissions, then acknowledges observed completion while
+the pinned helper is still alive. Shutdown is bounded to five seconds. Abrupt
+death is checked directly through its pidfd, including delayed watcher notifications;
+buffered final output cannot override it. Cancellation also releases the broker's
+waiter slot without cancelling the child.
+
 The MCP `run` tool accepts `operation`, keyword `arguments` and a caller-retained
 32-hex `request_id` for every mutation. Supported operations are Route discovery,
 start/batch, scoped list/status/events/follow/output and child cancel/stop/resume.
