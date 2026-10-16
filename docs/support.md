@@ -106,3 +106,10 @@ scoped reset information remains unknown. Text, nested subagent errors and
 automatic quota recovery, change accounts or replay an invocation. This envelope
 was observed on Claude Code 2.1.300; regression qualification uses synthetic native
 executables and does not certify current real-account quota availability.
+
+
+The internal Linux x86_64 namespace-launcher experiment is disconnected from
+adapters and RunManager. Its synthetic kernel tests do not change the unsupported
+worker-isolation capability or native qualification above. No host project,
+credential, artifact or broker mounts, account execution or networking are enabled.
+See [ADR 10](adr/0010-disconnected-namespace-launcher.md).
