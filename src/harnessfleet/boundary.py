@@ -160,6 +160,7 @@ class ExecutionHandle:
         self.init_fd = None
         self.namespace_fd = None
         self.info_fd = info_fd
+        self.startup_info = None
         self.block_fd = block_fd
         self.closed = False
 
@@ -184,7 +185,9 @@ class ExecutionHandle:
         if self.launcher_fd is None:
             self._pin_launcher()
         if self.init_fd is None:
-            self._pin_init(_information(self.info_fd, deadline))
+            if self.startup_info is None:
+                self.startup_info = _information(self.info_fd, deadline)
+            self._pin_init(self.startup_info)
 
     def _pin_init(self, info):
         pid = info.get("child-pid")

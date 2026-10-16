@@ -222,13 +222,17 @@ time.sleep(60)
             os.close(child_fd)
 
 
+@pytest.mark.parametrize("phase", ["launcher", "namespace"])
 def test_ownership_failure_retains_blocked_payload_until_explicit_reconciliation(
-    kernel_boundary, monkeypatch
+    kernel_boundary, monkeypatch, phase
 ):
     original = processes.pidfd_open
 
     def exhausted(pid):
-        if pid != os.getpid():
+        foreign_namespace = (
+            Path(f"/proc/{pid}/ns/pid").stat().st_ino != Path("/proc/self/ns/pid").stat().st_ino
+        )
+        if pid != os.getpid() and (phase == "launcher" or foreign_namespace):
             raise OSError(errno.EMFILE, "synthetic pidfd exhaustion")
         return original(pid)
 
