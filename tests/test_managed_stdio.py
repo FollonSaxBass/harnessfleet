@@ -1,5 +1,6 @@
 """Exercise the wire protocol in isolated processes with a synthetic broker client."""
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -65,11 +66,13 @@ class Client:
             return dict(operation=operation, arguments=kwargs)
         return call
 helper.Client = Client
-if os.environ.get("HF_PROTO_SHUTDOWN_FRAME"):
+if os.environ.get("HF_PROTO_SHUTDOWN_FRAME") or os.environ.get("HF_PROTO_NOTIFY_FRAME"):
     original = helper._Server.dispatch
     def shutdown_after_frame(server, packet):
+        if packet.get("id") == 100 and os.environ.get("HF_PROTO_NOTIFY_FRAME"):
+            os.write(2, b"fixture dispatch100\n")
         original(server, packet)
-        if packet.get("id") == 99:
+        if packet.get("id") == 99 and os.environ.get("HF_PROTO_SHUTDOWN_FRAME"):
             os.kill(os.getpid(), 15)
     helper._Server.dispatch = shutdown_after_frame
 sys.exit(helper.serve())
@@ -488,5 +491,17 @@ def test_sigterm_does_not_wait_for_stdout_backpressure(launch):
     wire.initialize()
     wire.call(arguments={"behavior": "backpressure"})
     assert select.select([wire.process.stdout], [], [], 3)[0]
+    wire.process.send_signal(signal.SIGTERM)
+    assert wire.process.wait(timeout=1) == 0
+
+
+def test_sigterm_interrupts_main_thread_stdout_backpressure(launch):
+    wire = launch({"HF_PROTO_NOTIFY_FRAME": "1"})
+    wire.initialize()
+    assert wire.process.stderr.readline() == b"fixture registration\n"
+    fcntl.fcntl(wire.process.stdout, fcntl.F_SETPIPE_SZ, 4096)
+    wire.raw(b'{"jsonrpc":"2.0","id":99,"method":"ping"}\n{"jsonrpc":"2.0","id":100,"method":"ping"}\n')
+    assert select.select([wire.process.stderr], [], [], 3)[0]
+    assert wire.process.stderr.readline() == b"fixture dispatch100\n"
     wire.process.send_signal(signal.SIGTERM)
     assert wire.process.wait(timeout=1) == 0

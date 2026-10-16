@@ -81,7 +81,11 @@ their own lifecycle. Unknown cleanup retains capacity.
 
 EOF and native `SIGTERM` request a graceful shutdown. The helper cancels waiters
 and core fences further admissions, then acknowledges observed completion while
-the pinned helper is still alive. Shutdown is bounded to five seconds. Abrupt
+the pinned helper is still alive. Explicit shutdown discards unfinished input and
+stops further buffered dispatch. It interrupts blocked response writes. The
+retirement acknowledgement wait is bounded to five seconds. Native clients can
+impose a shorter process shutdown interval; compatibility requires native tests.
+Abrupt
 death is checked directly through its pidfd, including delayed watcher notifications;
 buffered final output cannot override it. Cancellation also releases the broker's
 waiter slot without cancelling the child.

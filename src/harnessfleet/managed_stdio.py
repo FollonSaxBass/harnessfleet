@@ -153,9 +153,14 @@ class _Server:
             return
         try:
             view = memoryview(payload)
-            while view and not self.retired.is_set():
+            while view and not self.retired.is_set() and not self.shutdown_requested:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or not select.select([], [self.out], [], remaining)[1]:
+                if remaining <= 0:
+                    raise OSError()
+                _, writable, _ = select.select([self.wakeup_read], [self.out], [], remaining)
+                if self.shutdown_requested:
+                    return
+                if not writable:
                     raise OSError()
                 try:
                     view = view[os.write(self.out, view) :]
