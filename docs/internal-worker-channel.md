@@ -41,8 +41,11 @@ are refused. Every received SCM_RIGHTS descriptor is closed before rejecting it.
 A failed received-descriptor close revokes the receiver, preserves the handle's
 resource uncertainty and makes subsequent handle close refuse completion. The
 number is never retried, even if independent cleanup later frees it and an
-unrelated descriptor reuses that number. Raw ownership-descriptor errors follow
-the same retention rule. Other cleanup is still attempted; process exit evidence
+unrelated descriptor reuses that number. Cancellation preserves the original
+exception while remaining received descriptors still receive cleanup attempts. Raw ownership-descriptor errors follow
+the same retention rule. Endpoint and stream close errors remain recorded after an
+independent cleanup; another close cannot report success or retry the failed
+resource. Other cleanup is still attempted; process exit evidence
 is distinct from successful closure of all host resources.
 
 ## Failure and qualification boundaries
@@ -53,6 +56,10 @@ the cause of a startup refusal. Secondary cleanup does not replace the primary
 failure. Once writing or flushing the execution byte is attempted, execution may
 have started and no automatic retry is authorized. Runtime preparation attempts
 remaining descriptor cleanup after an error and retains unresolved resources.
+Preparation failures keep their runtime owner, including temporary source files,
+sealed descriptors and owners from nested construction failures. Cleanup cannot
+replace the original cancellation or unexpected failure. An incomplete startup
+retains unconfirmed process ownership even before namespace-init pinning.
 
 Tests use synthetic payloads, explicit pinned runtime fixtures and owned kernel
 processes. They cover original/forked senders, malformed frames, sequence and

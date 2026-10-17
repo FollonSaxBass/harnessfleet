@@ -222,12 +222,15 @@ def test_close_attempts_owned_cleanup_after_channel_close_failure(kernel_boundar
                 os.fstat(descriptor)
             assert error.value.errno == errno.EBADF
     finally:
-        handle.close()
+        with pytest.raises(PermissionError) as repeated:
+            handle.close()
+        assert repeated.value is failure and not handle.closed
 
 
 @pytest.mark.parametrize("close_before_error", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
 def test_failed_received_descriptor_cleanup_remains_uncertain_without_numeric_retry(
-    kernel_boundary, monkeypatch, close_before_error
+    kernel_boundary, monkeypatch, close_before_error, cancelled
 ):
     import fcntl
     import stat
@@ -238,14 +241,18 @@ def test_failed_received_descriptor_cleanup_remains_uncertain_without_numeric_re
             "s=socket.socket(fileno=int(os.environ['HF_CHANNEL_FD'])); "
             "f=os.open('/work/synthetic-right',os.O_CREAT|os.O_RDWR,0o600); "
             "s.sendmsg([struct.pack('!4sQII',b'HFCP',1,0,1)+b'x'],"
-            "[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[f]))]); "
+            "[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[f,f]))]); "
             "print('ready',flush=True);signal.pause()",
             runtime=kernel_boundary,
         ),
         control_channel=True,
     )
     original_close = os.close
-    problem = PermissionError(errno.EACCES, "controlled received descriptor cleanup refusal")
+    problem = (
+        KeyboardInterrupt("controlled received descriptor cancellation")
+        if cancelled
+        else PermissionError(errno.EACCES, "controlled received descriptor cleanup refusal")
+    )
     retained = []
     sentinel = None
 
@@ -273,11 +280,25 @@ def test_failed_received_descriptor_cleanup_remains_uncertain_without_numeric_re
 
         with monkeypatch.context() as fault:
             fault.setattr(os, "close", refusing_close)
-            with pytest.raises(FleetError):
+            with pytest.raises(KeyboardInterrupt if cancelled else FleetError) as received:
                 handle.control_channel.receive(timeout=3)
+            if cancelled:
+                assert received.value is problem
         assert len(retained) == 1
+        remaining = []
+        for value in os.listdir("/proc/self/fd"):
+            descriptor = int(value)
+            if descriptor not in existing:
+                try:
+                    if identity(descriptor) == retained[0][1]:
+                        remaining.append(descriptor)
+                except OSError:
+                    pass
+        assert remaining == ([] if close_before_error else [retained[0][0]])
+        with pytest.raises(FleetError, match="revoked"):
+            handle.control_channel.receive(timeout=3)
         assert handle.terminate(3).cleanup_confirmed
-        with pytest.raises(PermissionError) as caught:
+        with pytest.raises(type(problem)) as caught:
             handle.close()
         assert caught.value is problem and caught.value.handle is handle
         assert not handle.closed
@@ -293,22 +314,100 @@ def test_failed_received_descriptor_cleanup_remains_uncertain_without_numeric_re
             sentinel = duplicate
         assert sentinel == descriptor
         witness = identity(sentinel)
-        with pytest.raises(PermissionError):
+        with pytest.raises(type(problem)):
             handle.close()
         assert identity(sentinel) == witness
     finally:
-        if retained and not close_before_error:
-            descriptor, expected = retained[0]
-            try:
-                if identity(descriptor) == expected:
-                    original_close(descriptor)
-            except OSError:
-                pass
+        if retained:
+            expected = retained[0][1]
+            for value in os.listdir("/proc/self/fd"):
+                descriptor = int(value)
+                if descriptor not in existing and descriptor != sentinel:
+                    try:
+                        if identity(descriptor) == expected:
+                            original_close(descriptor)
+                    except OSError:
+                        pass
         if sentinel is not None:
             original_close(sentinel)
         if not handle.closed:
             assert handle.terminate(3).cleanup_confirmed
             try:
                 handle.close()
-            except PermissionError as error:
+            except (PermissionError, KeyboardInterrupt) as error:
                 assert error is problem
+
+
+@pytest.mark.parametrize("close_before_error", [False, True])
+@pytest.mark.parametrize("kind", [PermissionError, KeyboardInterrupt])
+def test_stream_cleanup_failure_stays_uncertain_after_independent_cleanup(
+    kernel_boundary, monkeypatch, close_before_error, kind
+):
+    handle = launch(LaunchSpec("pass", runtime=kernel_boundary), control_channel=True)
+    assert handle.wait(3).cleanup_confirmed
+    original = handle.process.stdout
+    primary = kind("controlled stream cleanup failure")
+
+    class FaultedStream:
+        def __init__(self):
+            self.failed = False
+
+        def close(self):
+            if self.failed:
+                original.close()
+                return
+            self.failed = True
+            if close_before_error:
+                original.close()
+            raise primary
+
+    handle.process.stdout = FaultedStream()
+    try:
+        with pytest.raises(kind) as caught:
+            handle.close()
+        assert caught.value is primary and primary.handle is handle
+        assert handle.process.stderr.closed
+        original.close()
+        sentinel = os.open("/dev/null", os.O_RDONLY)
+        try:
+            stamp = os.fstat(sentinel)
+            with pytest.raises(kind) as repeated:
+                handle.close()
+            assert repeated.value is primary and not handle.closed
+            assert os.fstat(sentinel) == stamp
+        finally:
+            os.close(sentinel)
+    finally:
+        original.close()
+
+
+def test_preinit_launch_refusal_retains_unconfirmed_process_cleanup(kernel_boundary, monkeypatch):
+    from harnessfleet.boundary import ExecutionHandle
+
+    original = ExecutionHandle._pin_launcher
+    primary = RuntimeError("controlled pre-init startup cancellation")
+    handle = None
+
+    def fail(handle):
+        original(handle)
+        raise primary
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(ExecutionHandle, "_pin_launcher", fail)
+            with pytest.raises(RuntimeError) as caught:
+                launch(
+                    LaunchSpec("print('forbidden-effect',flush=True)", runtime=kernel_boundary),
+                    control_channel=True,
+                )
+        handle = caught.value.handle
+        assert caught.value is primary and primary.cleanup_uncertain
+        assert not primary.execution_may_have_started
+    finally:
+        if handle is None:
+            handle = getattr(primary, "handle", None)
+        if handle is not None:
+            handle.reconcile_startup(3)
+            assert handle.terminate(3).cleanup_confirmed
+            assert b"forbidden-effect" not in handle.process.stdout.read()
+            handle.close()

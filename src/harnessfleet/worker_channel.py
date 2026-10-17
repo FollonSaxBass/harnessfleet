@@ -109,18 +109,28 @@ class _Receiver:
             else:
                 invalid = True
         close_errors = []
-        for descriptor in rights:
+        for descriptor in sorted(rights):
             try:
                 os.close(descriptor)
-            except OSError as error:
+            except BaseException as error:
                 handle._retain_descriptor_failure(descriptor, error)
                 close_errors.append(error)
         if close_errors:
             self._revoked = True
-            error = _refused("Received descriptor cleanup remains unconfirmed; retain handle")
+            primary = next(
+                (error for error in close_errors if not isinstance(error, OSError)), close_errors[0]
+            )
+            error = primary
+            if isinstance(primary, OSError):
+                error = _refused("Received descriptor cleanup remains unconfirmed; retain handle")
             error.handle = handle
             error.uncertain_descriptors = tuple(handle._uncertain_fds)
-            raise error from close_errors[0]
+            for secondary in close_errors:
+                if secondary is not primary:
+                    error.add_note("Received descriptor cleanup also failed: " + type(secondary).__name__)
+            if error is primary:
+                raise error
+            raise error from primary
         if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or invalid or len(credentials) != 1:
             raise _refused("Channel controls or truncation refused")
         if credentials[0] != (self._writer["pid"], self._uid, self._gid) or not self._live():

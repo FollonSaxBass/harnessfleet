@@ -157,17 +157,30 @@ class ExecutionHandle:
         self._exit_evidence = None
         self._uncertain_fds = []
         self._resource_failure = None
+        self._uncertain_resources = []
 
     @property
     def control_channel(self):
         return self._control_channel
+
+    def _close_resource(self, resource, close):
+        if any(resource is retained for retained in self._uncertain_resources):
+            return
+        try:
+            close()
+        except BaseException as error:
+            self._uncertain_resources.append(resource)
+            if self._resource_failure is None:
+                self._resource_failure = error
+            raise
 
     def _revoke_channel(self):
         errors = []
         for endpoint in (self._control_channel, self._channel_guest):
             if endpoint is not None:
                 try:
-                    endpoint.revoke() if endpoint is self._control_channel else endpoint.close()
+                    close = endpoint.revoke if endpoint is self._control_channel else endpoint.close
+                    self._close_resource(endpoint, close)
                 except BaseException as error:
                     errors.append(error)
         return errors
@@ -380,7 +393,7 @@ class ExecutionHandle:
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream is not None:
                 try:
-                    stream.close()
+                    self._close_resource(stream, stream.close)
                 except BaseException as error:
                     errors.append(error)
         if self._resource_failure is not None and self._resource_failure not in errors:
@@ -536,24 +549,26 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
         handle._pin_native(deadline)
         if handle.control_channel is not None:
             handle.control_channel._bind(handle)
-            handle._channel_guest.close()
+            handle._close_resource(handle._channel_guest, handle._channel_guest.close)
             handle._channel_guest = None
         # EOF on Bubblewrap's setup gate is permissive. This second gate requires a byte,
         # so supervisor death during setup never grants payload execution.
         grant_attempted = True
         handle.process.stdin.write(b"\x01")
-        handle.process.stdin.close()
+        handle._close_resource(handle.process.stdin, handle.process.stdin.close)
         handle.process.stdin = None
     except BaseException as error:
         primary = error
 
     cleanup_errors = []
     uncertain_fds = []
+    uncertain_endpoints = []
     for endpoint in (host, guest, receiver):
         if endpoint is not None:
             try:
                 endpoint.revoke() if endpoint is receiver else endpoint.close()
             except BaseException as error:
+                uncertain_endpoints.append(endpoint)
                 cleanup_errors.append(error)
     try:
         prepared.close()
@@ -566,6 +581,8 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
             except BaseException as error:
                 uncertain_fds.append(descriptor)
                 cleanup_errors.append(error)
+    cleanup_uncertain = bool(cleanup_errors or uncertain_fds or uncertain_endpoints)
+    process_cleanup_confirmed = process is None
     if primary is None and cleanup_errors:
         primary = cleanup_errors.pop(0)
     if primary is not None:
@@ -573,7 +590,7 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
             cleanup_errors.extend(handle._revoke_channel())
             if handle.init_fd is not None:
                 try:
-                    handle.terminate(1)
+                    process_cleanup_confirmed = handle.terminate(1).cleanup_confirmed
                 except BaseException as error:
                     cleanup_errors.append(error)
         error = primary
@@ -583,8 +600,18 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
         error.unregistered_process = process if handle is None else None
         error.startup_resources = prepared
         error.startup_descriptors = tuple(uncertain_fds)
+        error.startup_endpoints = tuple(uncertain_endpoints)
         error.execution_may_have_started = grant_attempted
-        error.cleanup_uncertain = bool(cleanup_errors or uncertain_fds)
+        error.cleanup_uncertain = bool(
+            cleanup_uncertain
+            or cleanup_errors
+            or not process_cleanup_confirmed
+            or prepared.mounts
+            or prepared.temporary
+            or prepared._close_error
+            or handle is not None
+            and handle._resource_failure
+        )
         for secondary in cleanup_errors:
             error.add_note("Startup cleanup also failed: " + type(secondary).__name__)
         if error is primary:
