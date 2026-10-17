@@ -68,6 +68,7 @@ def alive(record):
 
 def descendant(pid, root):
     handles = []
+    primary = None
     try:
         if not root or root.get("birth") is None:
             return False
@@ -93,11 +94,27 @@ def descendant(pid, root):
             seen.add(current)
             current = parent
         return False
-    except (OSError, ValueError, IndexError):
+    except (OSError, ValueError, IndexError) as error:
+        primary = error
         return False
+    except BaseException as error:
+        primary = error
+        raise
     finally:
+        failures = []
         for handle in handles:
-            os.close(handle)
+            try:
+                os.close(handle)
+            except BaseException as error:
+                failures.append((handle, error))
+        if failures:
+            error = primary if primary is not None else failures[0][1]
+            error.descriptor_cleanup_failures = tuple(failures)
+            error.uncertain_descriptors = tuple(descriptor for descriptor, _ in failures)
+            error.cleanup_uncertain = True
+            for _, secondary in failures:
+                error.add_note("Ancestry descriptor cleanup also failed: " + type(secondary).__name__)
+            raise error
 
 
 def terminate(run, include_supervisor=False):

@@ -203,6 +203,8 @@ class ExecutionHandle:
             self._resource_failure = error
 
     def _discard_pins(self, primary, *descriptors):
+        for descriptor, error in getattr(primary, "descriptor_cleanup_failures", ()):
+            self._retain_descriptor_failure(descriptor, error)
         for descriptor in descriptors:
             if descriptor is not None:
                 try:

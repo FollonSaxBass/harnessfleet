@@ -69,6 +69,9 @@ Locally opened launcher, init and native identity pins retain their cleanup
 failures before transfer; failed validation does not turn them into signaling
 authority. The seccomp descriptor is owned before filter construction, so a
 construction failure cannot hide uncertain closure or replace cancellation.
+Shared ancestry checks also attempt every local descriptor close and preserve
+the original failure. Cleanup uncertainty from those checks transfers to the
+startup handle instead of being discarded by the outer validation error.
 
 Tests use synthetic payloads, explicit pinned runtime fixtures and owned kernel
 processes. They cover original/forked senders, malformed frames, sequence and

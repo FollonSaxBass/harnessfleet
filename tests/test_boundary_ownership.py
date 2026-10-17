@@ -149,3 +149,76 @@ def test_seccomp_constructor_retains_descriptor_and_original_cancellation(kernel
         if "descriptor" in captured:
             assert os.fstat(captured["descriptor"]) == captured["stamp"]
             close(captured["descriptor"])
+
+
+@pytest.mark.parametrize("kind", [KeyboardInterrupt, OSError, None])
+def test_ancestry_cleanup_preserves_cancellation_and_transfers_uncertainty(
+    kernel_boundary, monkeypatch, kind
+):
+    primary = kind("controlled ancestry cancellation") if kind is not None else None
+    failure = PermissionError(errno.EACCES, "controlled ancestry cleanup failure")
+    handles, pins = [], []
+    original_pin = boundary.ExecutionHandle._pin_init
+    original_descendant = processes.descendant
+    pidfd_open, receipt, close = processes.pidfd_open, processes.receipt, os.close
+
+    def descendant(pid, root):
+        def opening(pid):
+            descriptor = pidfd_open(pid)
+            pins.append((descriptor, os.fstat(descriptor)))
+            return descriptor
+
+        def observing(pid):
+            if primary is not None and len(pins) == 2:
+                raise primary
+            return receipt(pid)
+
+        def closing(descriptor):
+            if descriptor == pins[0][0]:
+                raise failure
+            close(descriptor)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(processes, "pidfd_open", opening)
+            fault.setattr(processes, "receipt", observing)
+            fault.setattr(os, "close", closing)
+            return original_descendant(pid, root)
+
+    def pin(handle, info):
+        handles.append(handle)
+        return original_pin(handle, info)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(processes, "descendant", descendant)
+            fault.setattr(boundary.ExecutionHandle, "_pin_init", pin)
+            with pytest.raises(BaseException) as caught:
+                launch(LaunchSpec("print('forbidden-effect',flush=True)", runtime=kernel_boundary))
+        expected = primary if primary is not None else failure
+        assert (caught.value if kind is KeyboardInterrupt else caught.value.__cause__) is expected
+        assert caught.value.cleanup_uncertain and caught.value.handle is handles[0]
+        assert pins[0][0] in handles[0]._uncertain_fds
+        assert handles[0]._resource_failure is failure
+        for descriptor, _ in pins[1:]:
+            with pytest.raises(OSError) as closed:
+                os.fstat(descriptor)
+            assert closed.value.errno == errno.EBADF
+    finally:
+        if handles:
+            handle = handles[0]
+            if handle.init_fd is None:
+                handle.reconcile_startup(3)
+            assert handle.terminate(3).cleanup_confirmed
+            assert b"forbidden-effect" not in handle.process.stdout.read()
+            try:
+                handle.close()
+            except BaseException as error:
+                assert error is failure
+        for descriptor, stamp in pins:
+            try:
+                current = os.fstat(descriptor)
+            except OSError as error:
+                assert error.errno == errno.EBADF
+            else:
+                assert current == stamp
+                close(descriptor)
