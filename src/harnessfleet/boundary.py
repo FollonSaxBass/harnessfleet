@@ -107,7 +107,7 @@ def _validate(spec):
         raise FleetError("boundary_manifest", "Unavailable launcher in boundary manifest") from None
 
 
-def _seccomp():
+def _seccomp(owned):
     # Linux x86_64 audit architecture and syscall ABI; compat/x32 execution is excluded.
     rules = [(0x20, 0, 0, 4), (0x15, 1, 0, 0xC000003E), (0x06, 0, 0, 0x80000000)]
     rules += [(0x20, 0, 0, 0), (0x35, 0, 1, 0x40000000), (0x06, 0, 0, 0x80000000)]
@@ -118,18 +118,15 @@ def _seccomp():
     descriptor = libc.memfd_create(b"harnessfleet-boundary", 0x0001 | 0x0002)
     if descriptor < 0:
         raise OSError(ctypes.get_errno(), "Boundary filter creation failed")
-    try:
-        os.write(descriptor, b"".join(struct.pack("HBBI", *rule) for rule in rules))
-        fcntl.fcntl(
-            descriptor,
-            1033,  # F_ADD_SEALS, Linux UAPI, including Python builds omitting the constant.
-            0x0008 | 0x0004 | 0x0002 | 0x0001,
-        )
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
+    owned.append(descriptor)
+    os.write(descriptor, b"".join(struct.pack("HBBI", *rule) for rule in rules))
+    fcntl.fcntl(
+        descriptor,
+        1033,  # F_ADD_SEALS, Linux UAPI, including Python builds omitting the constant.
+        0x0008 | 0x0004 | 0x0002 | 0x0001,
+    )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return descriptor
 
 
 class ExecutionHandle:
@@ -201,6 +198,17 @@ class ExecutionHandle:
         if self._resource_failure is None:
             self._resource_failure = error
 
+    def _discard_pins(self, primary, *descriptors):
+        for descriptor in descriptors:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    self._retain_descriptor_failure(descriptor, error)
+                    primary.add_note("Unvalidated pin cleanup also failed: " + type(error).__name__)
+        primary.handle = self
+        primary.uncertain_descriptors = tuple(self._uncertain_fds)
+
     def _pin_launcher(self):
         if self.launcher is None:
             self.launcher = processes.receipt(self.process.pid)
@@ -213,10 +221,9 @@ class ExecutionHandle:
             ):
                 raise FleetError("boundary_identity", "Launcher identity could not be pinned")
             self.launcher_fd = descriptor
-            descriptor = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        except BaseException as primary:
+            self._discard_pins(primary, descriptor)
+            raise
 
     def reconcile_startup(self, timeout):
         """Pin the original blocked launch after an ownership-read failure; never release it."""
@@ -260,11 +267,9 @@ class ExecutionHandle:
             if processes.receipt(pid) != record or select.select([fd], [], [], 0)[0]:
                 raise FleetError("boundary_identity", "Namespace identity changed during startup")
             self.namespace_init, self.init_fd, self.namespace_fd = record, fd, namespace_fd
-            fd, namespace_fd = None, None
-        finally:
-            for descriptor in (fd, namespace_fd):
-                if descriptor is not None:
-                    os.close(descriptor)
+        except BaseException as primary:
+            self._discard_pins(primary, fd, namespace_fd)
+            raise
 
     def _pin_native(self, deadline):
         data = bytearray()
@@ -295,10 +300,9 @@ class ExecutionHandle:
             ):
                 raise FleetError("boundary_identity", "Native bootstrap identity could not be pinned")
             self.native_process, self.native_fd = record, descriptor
-            descriptor = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        except BaseException as primary:
+            self._discard_pins(primary, descriptor)
+            raise
 
     def _evidence(self):
         if self._exit_evidence is not None:
@@ -502,6 +506,7 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
     if platform.machine() != "x86_64":
         raise FleetError("boundary_platform", "Boundary syscall policy requires Linux x86_64")
     prepared = prepare_runtime(spec.runtime)
+    filter_descriptors = []
     info_read = info_write = block_read = block_write = seccomp = None
     handle = None
     receiver = guest = host = process = None
@@ -518,7 +523,7 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
             _validate(spec)
         info_read, info_write = os.pipe2(os.O_CLOEXEC)
         block_read, block_write = os.pipe2(os.O_CLOEXEC)
-        seccomp = _seccomp()
+        seccomp = _seccomp(filter_descriptors)
         command = _command(spec, launcher, prepared.mounts, info_write, block_read, seccomp)
         process = subprocess.Popen(
             command,
@@ -574,7 +579,7 @@ def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> Exe
         prepared.close()
     except BaseException as error:
         cleanup_errors.append(error)
-    for descriptor in (info_read, info_write, block_read, block_write, seccomp):
+    for descriptor in (info_read, info_write, block_read, block_write, *filter_descriptors):
         if descriptor is not None:
             try:
                 os.close(descriptor)
