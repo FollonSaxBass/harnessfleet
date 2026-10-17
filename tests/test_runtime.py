@@ -342,3 +342,174 @@ def test_restored_source_uses_sealed_size_for_archive_and_total(
         if prepared is not None:
             prepared.close()
         os.close(writer)
+
+
+@pytest.mark.parametrize("stage", ["source-close", "seal-primary", "validation-primary", "temporary-final"])
+@pytest.mark.parametrize("close_before_error", [False, True])
+def test_runtime_preparation_preserves_primary_and_all_descriptor_ownership(
+    synthetic_runtime, monkeypatch, stage, close_before_error
+):
+    from harnessfleet import runtime
+
+    files, _, _ = synthetic_runtime
+    original_close, original_source, original_seal = os.close, runtime._safe_source, runtime.seal_file
+    primary = RuntimeError("controlled preparation failure")
+    secondary = PermissionError(errno.EACCES, "controlled runtime cleanup refusal")
+    opened, sealed, uncertain = [], [], []
+    sources = {}
+    roles = {item.sha256: item.role for item in files}
+
+    def identity(fd):
+        info = os.fstat(fd)
+        return info.st_dev, info.st_ino, info.st_mode
+
+    def source(path):
+        fd = original_source(path)
+        sources[fd] = identity(fd)
+        opened.append((fd, identity(fd)))
+        return fd
+
+    def seal(fd, digest):
+        if stage == "seal-primary" and sealed:
+            raise primary
+        result = original_seal(fd, digest)
+        sealed.append((result, identity(result), roles[digest]))
+        opened.append((result, identity(result)))
+        return result
+
+    def close(fd):
+        try:
+            stamp = identity(fd)
+        except OSError:
+            return original_close(fd)
+        is_source = sources.get(fd) == stamp
+        is_sealed = next(
+            (role for number, expected, role in sealed if number == fd and expected == stamp), None
+        )
+        target = (
+            stage == "source-close"
+            and is_source
+            or stage == "seal-primary"
+            and is_source
+            and len(sealed) == 1
+            and len(opened) > 2
+            or stage == "validation-primary"
+            and is_sealed
+            or stage == "temporary-final"
+            and is_sealed == "stdlib"
+        )
+        if target and not uncertain:
+            uncertain.append((fd, stamp))
+            if close_before_error:
+                original_close(fd)
+            raise secondary
+        return original_close(fd)
+
+    def invalid(data):
+        raise primary
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(runtime, "_safe_source", source)
+            fault.setattr(runtime, "seal_file", seal)
+            fault.setattr(os, "close", close)
+            if stage == "validation-primary":
+                fault.setattr(runtime, "_elf", invalid)
+            with pytest.raises(BaseException) as caught:
+                prepare_runtime(RuntimeManifest(tuple(files)))
+        if stage in ("seal-primary", "validation-primary"):
+            assert caught.value is primary
+        else:
+            assert caught.value is secondary or caught.value.__cause__ is secondary
+        assert uncertain, "the test must actually inject the selected cleanup failure"
+        owner = caught.value.startup_resources
+        assert caught.value.cleanup_uncertain
+        retained = {fd for _, fd in owner.mounts} | set(owner.temporary)
+        assert retained == {uncertain[0][0]}
+        for fd, stamp in opened:
+            try:
+                current = identity(fd)
+            except OSError:
+                continue
+            if current == stamp:
+                assert fd in retained, "preparation abandoned an owned descriptor"
+        with pytest.raises(PermissionError) as repeated:
+            owner.close()
+        assert repeated.value is secondary
+    finally:
+        rescued = set()
+        for fd, stamp in opened:
+            if fd not in rescued:
+                try:
+                    if identity(fd) == stamp:
+                        original_close(fd)
+                        rescued.add(fd)
+                except OSError:
+                    pass
+
+
+@pytest.mark.parametrize("stage", ["source-open", "snapshot-write"])
+@pytest.mark.parametrize("close_before_error", [False, True])
+def test_nested_runtime_constructor_preserves_cancellation_and_owned_resources(
+    synthetic_runtime, monkeypatch, stage, close_before_error
+):
+
+    files, _, _ = synthetic_runtime
+    original_open, original_stat, original_write, original_close = os.open, os.fstat, os.write, os.close
+    primary = KeyboardInterrupt("controlled nested constructor cancellation")
+    secondary = PermissionError(errno.EACCES, "controlled nested resource cleanup failure")
+    target, failures = [], []
+
+    def identity(fd):
+        info = original_stat(fd)
+        return info.st_dev, info.st_ino
+
+    def opening(path, *args, **kwargs):
+        fd = original_open(path, *args, **kwargs)
+        if stage == "source-open" and path == "/" and not target:
+            target.append((fd, identity(fd)))
+        return fd
+
+    def inspecting(fd):
+        if stage == "source-open" and target and fd == target[0][0]:
+            raise primary
+        return original_stat(fd)
+
+    def writing(fd, data):
+        if stage == "snapshot-write" and os.readlink(f"/proc/self/fd/{fd}").startswith(
+            "/memfd:harnessfleet-runtime"
+        ):
+            target.append((fd, identity(fd)))
+            raise primary
+        return original_write(fd, data)
+
+    def closing(fd):
+        if target and fd == target[0][0] and not failures:
+            failures.append(True)
+            if close_before_error:
+                original_close(fd)
+            raise secondary
+        return original_close(fd)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(os, "open", opening)
+            fault.setattr(os, "fstat", inspecting)
+            fault.setattr(os, "write", writing)
+            fault.setattr(os, "close", closing)
+            with pytest.raises(BaseException) as caught:
+                prepare_runtime(RuntimeManifest(tuple(files)))
+        assert failures and caught.value is primary
+        assert primary.cleanup_uncertain
+        owner = primary.startup_resources
+        with pytest.raises(PermissionError) as repeated:
+            owner.close()
+        assert repeated.value is secondary
+    finally:
+        if target and not close_before_error:
+            fd, stamp = target[0]
+            try:
+                if identity(fd) == stamp:
+                    original_close(fd)
+            except OSError:
+                pass

@@ -4,7 +4,7 @@ Only explicit hash-pinned runtime snapshots are mounted. Writable paths are ephe
 There are no host project, credential, artifact or broker mounts and no networking.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import ctypes
 import errno
 import fcntl
@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import select
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -23,6 +24,7 @@ import time
 from . import processes
 from .contracts import FleetError
 from .runtime import RuntimeManifest, prepare_runtime
+from .worker_channel import _Receiver
 
 READY = b"harnessfleet-boundary-ready-v1\n"
 BOOTSTRAP = """
@@ -105,7 +107,7 @@ def _validate(spec):
         raise FleetError("boundary_manifest", "Unavailable launcher in boundary manifest") from None
 
 
-def _seccomp():
+def _seccomp(owned):
     # Linux x86_64 audit architecture and syscall ABI; compat/x32 execution is excluded.
     rules = [(0x20, 0, 0, 4), (0x15, 1, 0, 0xC000003E), (0x06, 0, 0, 0x80000000)]
     rules += [(0x20, 0, 0, 0), (0x35, 0, 1, 0x40000000), (0x06, 0, 0, 0x80000000)]
@@ -116,18 +118,15 @@ def _seccomp():
     descriptor = libc.memfd_create(b"harnessfleet-boundary", 0x0001 | 0x0002)
     if descriptor < 0:
         raise OSError(ctypes.get_errno(), "Boundary filter creation failed")
-    try:
-        os.write(descriptor, b"".join(struct.pack("HBBI", *rule) for rule in rules))
-        fcntl.fcntl(
-            descriptor,
-            1033,  # F_ADD_SEALS, Linux UAPI, including Python builds omitting the constant.
-            0x0008 | 0x0004 | 0x0002 | 0x0001,
-        )
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
+    owned.append(descriptor)
+    os.write(descriptor, b"".join(struct.pack("HBBI", *rule) for rule in rules))
+    fcntl.fcntl(
+        descriptor,
+        1033,  # F_ADD_SEALS, Linux UAPI, including Python builds omitting the constant.
+        0x0008 | 0x0004 | 0x0002 | 0x0001,
+    )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return descriptor
 
 
 class ExecutionHandle:
@@ -137,7 +136,7 @@ class ExecutionHandle:
     Keep the handle on uncertainty. close() requires confirmed exit of both identities.
     """
 
-    def __init__(self, process, info_fd, block_fd):
+    def __init__(self, process, info_fd, block_fd, *, control_channel=None, guest=None):
         self.process = process
         self.launcher = None
         self.launcher_fd = None
@@ -150,6 +149,71 @@ class ExecutionHandle:
         self.startup_info = None
         self.block_fd = block_fd
         self.closed = False
+        self._control_channel = control_channel
+        self._channel_guest = guest
+        self._exit_evidence = None
+        self._uncertain_fds = []
+        self._resource_failure = None
+        self._uncertain_resources = []
+
+    @property
+    def control_channel(self):
+        return self._control_channel
+
+    def _close_resource(self, resource, close):
+        if any(resource is retained for retained in self._uncertain_resources):
+            return
+        try:
+            close()
+        except BaseException as error:
+            self._retain_resource_failure(resource, error)
+            raise
+
+    def _retain_resource_failure(self, resource, error):
+        if not any(resource is retained for retained in self._uncertain_resources):
+            self._uncertain_resources.append(resource)
+        if self._resource_failure is None:
+            self._resource_failure = error
+
+    def _revoke_channel(self):
+        errors = []
+        for endpoint in (self._control_channel, self._channel_guest):
+            if endpoint is not None:
+                try:
+                    close = endpoint.revoke if endpoint is self._control_channel else endpoint.close
+                    self._close_resource(endpoint, close)
+                except BaseException as error:
+                    errors.append(error)
+        return errors
+
+    def _close_descriptor(self, name):
+        descriptor = getattr(self, name)
+        setattr(self, name, None)
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                # A failed close may already have consumed the FD. Never retry its number.
+                self._retain_descriptor_failure(descriptor, error)
+                raise
+
+    def _retain_descriptor_failure(self, descriptor, error):
+        self._uncertain_fds.append(descriptor)
+        if self._resource_failure is None:
+            self._resource_failure = error
+
+    def _discard_pins(self, primary, *descriptors):
+        for descriptor, error in getattr(primary, "descriptor_cleanup_failures", ()):
+            self._retain_descriptor_failure(descriptor, error)
+        for descriptor in descriptors:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    self._retain_descriptor_failure(descriptor, error)
+                    primary.add_note("Unvalidated pin cleanup also failed: " + type(error).__name__)
+        primary.handle = self
+        primary.uncertain_descriptors = tuple(self._uncertain_fds)
 
     def _pin_launcher(self):
         if self.launcher is None:
@@ -163,10 +227,9 @@ class ExecutionHandle:
             ):
                 raise FleetError("boundary_identity", "Launcher identity could not be pinned")
             self.launcher_fd = descriptor
-            descriptor = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        except BaseException as primary:
+            self._discard_pins(primary, descriptor)
+            raise
 
     def reconcile_startup(self, timeout):
         """Pin the original blocked launch after an ownership-read failure; never release it."""
@@ -210,11 +273,9 @@ class ExecutionHandle:
             if processes.receipt(pid) != record or select.select([fd], [], [], 0)[0]:
                 raise FleetError("boundary_identity", "Namespace identity changed during startup")
             self.namespace_init, self.init_fd, self.namespace_fd = record, fd, namespace_fd
-            fd, namespace_fd = None, None
-        finally:
-            for descriptor in (fd, namespace_fd):
-                if descriptor is not None:
-                    os.close(descriptor)
+        except BaseException as primary:
+            self._discard_pins(primary, fd, namespace_fd)
+            raise
 
     def _pin_native(self, deadline):
         data = bytearray()
@@ -245,12 +306,13 @@ class ExecutionHandle:
             ):
                 raise FleetError("boundary_identity", "Native bootstrap identity could not be pinned")
             self.native_process, self.native_fd = record, descriptor
-            descriptor = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        except BaseException as primary:
+            self._discard_pins(primary, descriptor)
+            raise
 
     def _evidence(self):
+        if self._exit_evidence is not None:
+            return self._exit_evidence
         ended = (
             not self.closed and self.init_fd is not None and bool(select.select([self.init_fd], [], [], 0)[0])
         )
@@ -274,39 +336,85 @@ class ExecutionHandle:
         return self._evidence()
 
     def terminate(self, timeout):
+        errors = self._revoke_channel()
+        try:
+            evidence = self._terminate(timeout)
+        except BaseException as error:
+            error.handle = self
+            for secondary in errors:
+                error.add_note("Channel revocation also failed: " + type(secondary).__name__)
+            raise
+        if errors:
+            error = errors[0]
+            error.handle = self
+            for secondary in errors[1:]:
+                error.add_note("Channel revocation also failed: " + type(secondary).__name__)
+            raise error
+        return evidence
+
+    def _terminate(self, timeout):
         deadline = _deadline(timeout)
         if self.closed:
             raise FleetError("boundary_closed", "Boundary handle is closed")
-        if self.init_fd is None:
+        if self._exit_evidence is not None or self.init_fd is None:
             return self._evidence()
+        errors = []
         for fd in (self.init_fd, self.launcher_fd):
-            if fd is not None and not select.select([fd], [], [], 0)[0]:
+            if fd is not None:
                 try:
-                    processes.signal_fd(fd, signal.SIGKILL)
+                    if not select.select([fd], [], [], 0)[0]:
+                        processes.signal_fd(fd, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        return self.wait(max(0.001, deadline - time.monotonic()))
+                except OSError as error:
+                    errors.append(error)
+        evidence = self.wait(max(0.001, deadline - time.monotonic()))
+        if errors:
+            raise errors[0]
+        return evidence
 
     def close(self):
+        errors = self._revoke_channel()
         if self.closed:
+            if errors:
+                error = errors[0]
+                error.handle = self
+                raise error
             return
-        if not self._evidence().cleanup_confirmed:
+        try:
+            evidence = self._evidence()
+        except BaseException as error:
+            error.handle = self
+            for secondary in errors:
+                error.add_note("Channel revocation also failed: " + type(secondary).__name__)
+            raise
+        if not evidence.cleanup_confirmed:
             error = FleetError("boundary_uncertain", "Boundary cleanup remains unconfirmed; retain handle")
             error.handle = self
+            for secondary in errors:
+                error.add_note("Channel revocation also failed: " + type(secondary).__name__)
             raise error
-        for fd in (
-            self.init_fd,
-            self.launcher_fd,
-            self.native_fd,
-            self.namespace_fd,
-            self.info_fd,
-            self.block_fd,
-        ):
-            if fd is not None:
-                os.close(fd)
+        self._exit_evidence = evidence
+        for name in ("init_fd", "launcher_fd", "native_fd", "namespace_fd", "info_fd", "block_fd"):
+            try:
+                self._close_descriptor(name)
+            except BaseException as error:
+                errors.append(error)
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream is not None:
-                stream.close()
+                try:
+                    self._close_resource(stream, stream.close)
+                except BaseException as error:
+                    errors.append(error)
+        if self._resource_failure is not None and self._resource_failure not in errors:
+            errors.append(self._resource_failure)
+        if errors:
+            error = errors[0]
+            error.handle = self
+            error.uncertain_descriptors = tuple(self._uncertain_fds)
+            for secondary in errors[1:]:
+                error.add_note("Owned resource cleanup also failed: " + type(secondary).__name__)
+            raise error
         self.closed = True
 
 
@@ -395,19 +503,33 @@ def _command(spec, launcher, mounts, info_write, block_read, seccomp):
     return command
 
 
-def launch(spec: LaunchSpec, *, startup_timeout=5) -> ExecutionHandle:
+def launch(spec: LaunchSpec, *, startup_timeout=5, control_channel=False) -> ExecutionHandle:
     deadline = _deadline(startup_timeout)
     launcher = _validate(spec)
+    if type(control_channel) is not bool or control_channel and "HF_CHANNEL_FD" in spec.environment:
+        raise FleetError("boundary_channel", "Unsupported channel option or reserved environment")
     processes.require_linux()
     if platform.machine() != "x86_64":
         raise FleetError("boundary_platform", "Boundary syscall policy requires Linux x86_64")
     prepared = prepare_runtime(spec.runtime)
+    filter_descriptors = []
     info_read = info_write = block_read = block_write = seccomp = None
     handle = None
+    receiver = guest = host = process = None
+    primary = None
+    grant_attempted = False
     try:
+        if control_channel:
+            host, guest = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            host.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            guest.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            receiver = _Receiver(host)
+            host = None
+            spec = replace(spec, environment={**spec.environment, "HF_CHANNEL_FD": str(guest.fileno())})
+            _validate(spec)
         info_read, info_write = os.pipe2(os.O_CLOEXEC)
         block_read, block_write = os.pipe2(os.O_CLOEXEC)
-        seccomp = _seccomp()
+        seccomp = _seccomp(filter_descriptors)
         command = _command(spec, launcher, prepared.mounts, info_write, block_read, seccomp)
         process = subprocess.Popen(
             command,
@@ -416,42 +538,94 @@ def launch(spec: LaunchSpec, *, startup_timeout=5) -> ExecutionHandle:
             stderr=subprocess.PIPE,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
             close_fds=True,
-            pass_fds=(info_write, block_read, seccomp, *(descriptor for _, descriptor in prepared.mounts)),
+            pass_fds=(
+                info_write,
+                block_read,
+                seccomp,
+                *((guest.fileno(),) if guest is not None else ()),
+                *(descriptor for _, descriptor in prepared.mounts),
+            ),
             start_new_session=True,
         )
-        handle = ExecutionHandle(process, info_read, block_write)
+        handle = ExecutionHandle(process, info_read, block_write, control_channel=receiver, guest=guest)
+        receiver = guest = None
         # Transfer the startup gate before any identity syscall can fail.
         info_read, block_write = None, None
         handle._pin_launcher()
-        os.close(info_write)
-        info_write = None
-        os.close(block_read)
-        block_read = None
         handle.reconcile_startup(max(0.001, deadline - time.monotonic()))
         # No payload executes until the host pins the distinct launcher and trusted init identities.
         os.write(handle.block_fd, b"x")
-        os.close(handle.block_fd)
-        handle.block_fd = None
-        os.close(handle.info_fd)
-        handle.info_fd = None
+        handle._close_descriptor("block_fd")
+        handle._close_descriptor("info_fd")
         handle._pin_native(deadline)
+        if handle.control_channel is not None:
+            handle.control_channel._bind(handle)
+            handle._close_resource(handle._channel_guest, handle._channel_guest.close)
+            handle._channel_guest = None
         # EOF on Bubblewrap's setup gate is permissive. This second gate requires a byte,
         # so supervisor death during setup never grants payload execution.
+        grant_attempted = True
         handle.process.stdin.write(b"\x01")
-        handle.process.stdin.close()
+        handle._close_resource(handle.process.stdin, handle.process.stdin.close)
         handle.process.stdin = None
-        return handle
-    except (OSError, FleetError, StopIteration) as cause:
-        error = FleetError("boundary_startup", "Namespace startup failed; no automatic retry")
-        error.handle = handle
-        if handle is not None and handle.init_fd is not None:
+    except BaseException as error:
+        primary = error
+
+    cleanup_errors = []
+    uncertain_fds = []
+    uncertain_endpoints = []
+    for endpoint in (host, guest, receiver):
+        if endpoint is not None:
             try:
-                handle.terminate(1)
-            except (OSError, FleetError):
-                error.cleanup_uncertain = True
-        raise error from cause
-    finally:
+                endpoint.revoke() if endpoint is receiver else endpoint.close()
+            except BaseException as error:
+                uncertain_endpoints.append(endpoint)
+                cleanup_errors.append(error)
+    try:
         prepared.close()
-        for descriptor in (info_read, info_write, block_read, block_write, seccomp):
-            if descriptor is not None:
+    except BaseException as error:
+        cleanup_errors.append(error)
+    for descriptor in (info_read, info_write, block_read, block_write, *filter_descriptors):
+        if descriptor is not None:
+            try:
                 os.close(descriptor)
+            except BaseException as error:
+                uncertain_fds.append(descriptor)
+                cleanup_errors.append(error)
+    cleanup_uncertain = bool(cleanup_errors or uncertain_fds or uncertain_endpoints)
+    process_cleanup_confirmed = process is None
+    if primary is None and cleanup_errors:
+        primary = cleanup_errors.pop(0)
+    if primary is not None:
+        if handle is not None:
+            cleanup_errors.extend(handle._revoke_channel())
+            if handle.init_fd is not None:
+                try:
+                    process_cleanup_confirmed = handle.terminate(1).cleanup_confirmed
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        error = primary
+        if isinstance(primary, (OSError, FleetError, StopIteration)):
+            error = FleetError("boundary_startup", "Namespace startup failed; no automatic retry")
+        error.handle = handle
+        error.unregistered_process = process if handle is None else None
+        error.startup_resources = prepared
+        error.startup_descriptors = tuple(uncertain_fds)
+        error.startup_endpoints = tuple(uncertain_endpoints)
+        error.execution_may_have_started = grant_attempted
+        error.cleanup_uncertain = bool(
+            cleanup_uncertain
+            or cleanup_errors
+            or not process_cleanup_confirmed
+            or prepared.mounts
+            or prepared.temporary
+            or prepared._close_error
+            or handle is not None
+            and handle._resource_failure
+        )
+        for secondary in cleanup_errors:
+            error.add_note("Startup cleanup also failed: " + type(secondary).__name__)
+        if error is primary:
+            raise error
+        raise error from primary
+    return handle

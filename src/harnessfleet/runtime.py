@@ -64,6 +64,8 @@ def _seal_bytes(data):
     fd = libc.memfd_create(b"harnessfleet-runtime", 3)
     if fd < 0:
         raise OSError(ctypes.get_errno(), "Runtime snapshot creation failed")
+    owner = PreparedRuntime()
+    owner.temporary.append(fd)
     try:
         view = memoryview(data)
         while view:
@@ -75,10 +77,10 @@ def _seal_bytes(data):
         if fcntl.fcntl(fd, 1034) & SEALS != SEALS:
             raise _failure()
         os.lseek(fd, 0, os.SEEK_SET)
+        owner.temporary.remove(fd)
         return fd
-    except BaseException:
-        os.close(fd)
-        raise
+    except BaseException as error:
+        _raise_preparation_failure(error, owner)
 
 
 def seal_file(source_fd, expected_sha256, limit=MAX_FILE):
@@ -108,6 +110,8 @@ def _safe_source(path):
     if not p.is_absolute() or str(p) != path or ".." in p.parts or "\0" in path or len(path) > 4096:
         raise _failure()
     directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    owner = PreparedRuntime()
+    owner.temporary.append(directory)
     try:
         for index, component in enumerate(p.parts[1:]):
             info = os.fstat(directory)
@@ -118,7 +122,8 @@ def _safe_source(path):
             if not final:
                 flags |= os.O_DIRECTORY
             child = os.open(component, flags, dir_fd=directory)
-            os.close(directory)
+            owner.temporary.append(child)
+            owner.close_temporary(directory)
             directory = child
         info = os.fstat(directory)
         if (
@@ -127,11 +132,10 @@ def _safe_source(path):
             or not stat.S_ISREG(info.st_mode)
         ):
             raise _failure()
-        result, directory = directory, None
-        return result
-    finally:
-        if directory is not None:
-            os.close(directory)
+        owner.temporary.remove(directory)
+        return directory
+    except BaseException as error:
+        _raise_preparation_failure(error, owner)
 
 
 def _elf(data):
@@ -273,28 +277,89 @@ def _validate(manifest):
 class PreparedRuntime:
     def __init__(self):
         self.mounts = []
+        self.temporary = []
+        self.children = []
+        self._uncertain = set()
+        self._close_error = None
+
+    def _close_descriptor(self, descriptor):
+        if descriptor in self._uncertain:
+            return
+        try:
+            os.close(descriptor)
+        except BaseException as error:
+            self._uncertain.add(descriptor)
+            if self._close_error is None:
+                self._close_error = error
+            elif error is not self._close_error:
+                self._close_error.add_note("Runtime descriptor cleanup also failed: " + type(error).__name__)
+            raise
+
+    def close_temporary(self, descriptor):
+        self._close_descriptor(descriptor)
+        if descriptor not in self._uncertain:
+            self.temporary.remove(descriptor)
 
     def close(self):
-        while self.mounts:
-            _, descriptor = self.mounts.pop()
-            os.close(descriptor)
+        retained = []
+        for mount in self.mounts:
+            try:
+                self._close_descriptor(mount[1])
+            except BaseException:
+                pass
+            if mount[1] in self._uncertain:
+                retained.append(mount)
+        self.mounts = retained
+        for descriptor in list(self.temporary):
+            try:
+                self.close_temporary(descriptor)
+            except BaseException:
+                pass
+        for child in self.children:
+            try:
+                child.close()
+            except BaseException as error:
+                if self._close_error is None:
+                    self._close_error = error
+                elif error is not self._close_error:
+                    self._close_error.add_note("Nested runtime cleanup also failed: " + type(error).__name__)
+        if self._close_error is not None:
+            # Retain uncertain resources without retrying a possibly reused number.
+            raise self._close_error
+
+
+def _raise_preparation_failure(primary, owner):
+    nested = getattr(primary, "startup_resources", None)
+    if nested is not None and nested is not owner:
+        owner.children.append(nested)
+    try:
+        owner.close()
+    except BaseException as secondary:
+        if secondary is not primary:
+            primary.add_note("Runtime preparation cleanup also failed: " + type(secondary).__name__)
+    error = primary
+    if isinstance(primary, (OSError, ValueError, struct.error, UnicodeError, FleetError)):
+        error = _failure()
+    error.startup_resources = owner
+    error.cleanup_uncertain = bool(owner.mounts or owner.temporary or owner._close_error)
+    if error is primary:
+        raise error
+    raise error from primary
 
 
 def prepare_runtime(manifest):
     _validate(manifest)
     result = PreparedRuntime()
-    temporary = []
     try:
         total, elf = 0, []
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
             for item in sorted(manifest.files, key=lambda item: item.guest):
                 source = _safe_source(item.source)
-                try:
-                    descriptor = seal_file(source, item.sha256)
-                finally:
-                    os.close(source)
-                temporary.append(descriptor)
+                result.temporary.append(source)
+                descriptor = seal_file(source, item.sha256)
+                result.temporary.append(descriptor)
+                result.close_temporary(source)
                 size = os.fstat(descriptor).st_size
                 total += size
                 if total > MAX_TOTAL:
@@ -311,7 +376,7 @@ def prepare_runtime(manifest):
                 else:
                     elf.append((item, _elf(data)))
                     result.mounts.append((item.guest, descriptor))
-                    temporary.remove(descriptor)
+                    result.temporary.remove(descriptor)
         names = {}
         for item, (_, sonames, _) in elf:
             if item.role in ("library", "loader"):
@@ -330,12 +395,8 @@ def prepare_runtime(manifest):
         if len(data) > MAX_ZIP:
             raise _failure()
         result.mounts.append(("/usr/lib/python312.zip", _seal_bytes(data)))
+        for descriptor in list(result.temporary):
+            result.close_temporary(descriptor)
         return result
-    except BaseException as error:
-        result.close()
-        if isinstance(error, (OSError, ValueError, struct.error, UnicodeError, FleetError)):
-            raise _failure() from error
-        raise
-    finally:
-        for descriptor in temporary:
-            os.close(descriptor)
+    except BaseException as primary:
+        _raise_preparation_failure(primary, result)
