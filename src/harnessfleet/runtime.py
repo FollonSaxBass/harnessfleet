@@ -273,11 +273,27 @@ def _validate(manifest):
 class PreparedRuntime:
     def __init__(self):
         self.mounts = []
+        self._close_error = None
 
     def close(self):
-        while self.mounts:
-            _, descriptor = self.mounts.pop()
-            os.close(descriptor)
+        if self._close_error is not None:
+            raise self._close_error
+        retained = []
+        for mount in self.mounts:
+            try:
+                os.close(mount[1])
+            except BaseException as error:
+                retained.append(mount)
+                if self._close_error is None:
+                    self._close_error = error
+                else:
+                    self._close_error.add_note(
+                        "Runtime descriptor cleanup also failed: " + type(error).__name__
+                    )
+        self.mounts = retained
+        if self._close_error is not None:
+            # Retain uncertain descriptors; a close error never authorizes a numeric retry.
+            raise self._close_error
 
 
 def prepare_runtime(manifest):
