@@ -411,3 +411,134 @@ def test_preinit_launch_refusal_retains_unconfirmed_process_cleanup(kernel_bound
             assert handle.terminate(3).cleanup_confirmed
             assert b"forbidden-effect" not in handle.process.stdout.read()
             handle.close()
+
+
+@pytest.mark.parametrize("close_before_error", [False, True])
+def test_runtime_close_descriptor_failure_retains_uncertainty_and_refuses_retry(
+    kernel_boundary, monkeypatch, close_before_error
+):
+    import fcntl
+    from harnessfleet.runtime import PreparedRuntime
+
+    original_prepared_close = PreparedRuntime.close
+    original_os_close = os.close
+    problem = OSError(errno.EIO, "controlled runtime descriptor cleanup refusal")
+    observed = []
+    all_mounts = []
+    sentinel = None
+    handle = None
+
+    def identity(descriptor):
+        info = os.fstat(descriptor)
+        return info.st_dev, info.st_ino, info.st_mode
+
+    def instrumented_prepared_close(self):
+        assert self.mounts, "Prepared runtime mounts must not be empty"
+        all_mounts.extend(self.mounts)
+        target_guest, target_fd = self.mounts[0]
+        target_identity = identity(target_fd)
+        observed.append((target_guest, target_fd, target_identity, self))
+
+        def refusing_close(descriptor):
+            if descriptor == target_fd:
+                if close_before_error:
+                    original_os_close(descriptor)
+                raise problem
+            return original_os_close(descriptor)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(os, "close", refusing_close)
+            return original_prepared_close(self)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(PreparedRuntime, "close", instrumented_prepared_close)
+            with pytest.raises(FleetError) as caught:
+                launch(LaunchSpec("pass", runtime=kernel_boundary))
+        err = caught.value
+        handle = err.handle
+        assert err.code == "boundary_startup"
+        assert err.__cause__ is problem
+        assert err.handle is not None
+        assert err.handle.process.poll() is not None
+        assert err.execution_may_have_started is True
+        assert observed and err.startup_resources is observed[0][3]
+        assert err.cleanup_uncertain is True
+
+        target_guest, target_fd, expected_identity, prepared = observed[0]
+        assert prepared.mounts == [(target_guest, target_fd)]
+        for _, descriptor in all_mounts:
+            if descriptor != target_fd:
+                with pytest.raises(OSError) as closed:
+                    os.fstat(descriptor)
+                assert closed.value.errno == errno.EBADF
+
+        if not close_before_error:
+            assert identity(target_fd) == expected_identity
+            original_os_close(target_fd)
+        else:
+            with pytest.raises(OSError) as stat_err:
+                os.fstat(target_fd)
+            assert stat_err.value.errno == errno.EBADF
+
+        sentinel = os.open("/dev/null", os.O_RDONLY)
+        if sentinel != target_fd:
+            duplicate = fcntl.fcntl(sentinel, fcntl.F_DUPFD_CLOEXEC, target_fd)
+            original_os_close(sentinel)
+            sentinel = duplicate
+        assert sentinel == target_fd
+        witness = identity(sentinel)
+
+        with pytest.raises(OSError) as sticky_caught:
+            prepared.close()
+        assert sticky_caught.value is problem
+        assert identity(sentinel) == witness
+    finally:
+        if observed and not close_before_error:
+            _, target_fd, expected_identity, _ = observed[0]
+            try:
+                if identity(target_fd) == expected_identity:
+                    original_os_close(target_fd)
+            except OSError:
+                pass
+        if sentinel is not None:
+            original_os_close(sentinel)
+        if handle is not None:
+            assert handle.terminate(3).cleanup_confirmed
+            handle.close()
+
+
+def test_runtime_close_wrapper_failure_after_success_captures_uncertainty_without_retained_mounts(
+    kernel_boundary, monkeypatch
+):
+    from harnessfleet.runtime import PreparedRuntime
+
+    original_prepared_close = PreparedRuntime.close
+    wrapper_error = OSError(errno.ENOSPC, "controlled wrapper cleanup failure after all closed")
+    prepared_instances = []
+
+    def close_then_fail(prepared):
+        prepared_instances.append(prepared)
+        original_prepared_close(prepared)
+        raise wrapper_error
+
+    handle = None
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(PreparedRuntime, "close", close_then_fail)
+            with pytest.raises(FleetError) as caught:
+                launch(LaunchSpec("pass", runtime=kernel_boundary))
+        err = caught.value
+        handle = err.handle
+        assert err.code == "boundary_startup"
+        assert err.__cause__ is wrapper_error
+        assert handle is not None and handle.process.poll() is not None
+        assert err.execution_may_have_started is True
+        assert err.startup_resources is prepared_instances[0]
+        assert err.startup_resources.mounts == []
+        assert err.cleanup_uncertain is True
+        err.startup_resources.close()
+    finally:
+        if handle is not None:
+            assert handle.terminate(3).cleanup_confirmed
+            handle.close()
