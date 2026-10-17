@@ -48,6 +48,11 @@ independent cleanup; another close cannot report success or retry the failed
 resource. Other cleanup is still attempted; process exit evidence
 is distinct from successful closure of all host resources.
 
+Direct `handle.control_channel.revoke()` shares the same retained endpoint
+failure as handle-driven cleanup. Revocation remains permanent, and repeated
+calls preserve the error without retrying a possibly consumed endpoint. Startup
+receivers retain close failures even before attachment to a handle.
+
 ## Failure and qualification boundaries
 
 Post-spawn failure retains the original handle. Unexpected exceptions and
@@ -60,6 +65,10 @@ Preparation failures keep their runtime owner, including temporary source files,
 sealed descriptors and owners from nested construction failures. Cleanup cannot
 replace the original cancellation or unexpected failure. An incomplete startup
 retains unconfirmed process ownership even before namespace-init pinning.
+Locally opened launcher, init and native identity pins retain their cleanup
+failures before transfer; failed validation does not turn them into signaling
+authority. The seccomp descriptor is owned before filter construction, so a
+construction failure cannot hide uncertain closure or replace cancellation.
 
 Tests use synthetic payloads, explicit pinned runtime fixtures and owned kernel
 processes. They cover original/forked senders, malformed frames, sequence and

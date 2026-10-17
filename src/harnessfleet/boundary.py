@@ -166,10 +166,14 @@ class ExecutionHandle:
         try:
             close()
         except BaseException as error:
-            self._uncertain_resources.append(resource)
-            if self._resource_failure is None:
-                self._resource_failure = error
+            self._retain_resource_failure(resource, error)
             raise
+
+    def _retain_resource_failure(self, resource, error):
+        if not any(resource is retained for retained in self._uncertain_resources):
+            self._uncertain_resources.append(resource)
+        if self._resource_failure is None:
+            self._resource_failure = error
 
     def _revoke_channel(self):
         errors = []

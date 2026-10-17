@@ -30,6 +30,8 @@ class _Receiver:
         self._revoked = False
         self._sequence = 0
         self._attempts = 0
+        self._close_error = None
+        self._closed = False
 
     def _bind(self, handle):
         if self._handle is not None or self._revoked:
@@ -56,7 +58,21 @@ class _Receiver:
 
     def revoke(self):
         self._revoked = True
-        self._endpoint.close()
+        if self._close_error is not None:
+            raise self._close_error
+        handle = self._handle
+        if handle is not None and any(self is resource for resource in handle._uncertain_resources):
+            raise handle._resource_failure
+        if self._closed:
+            return
+        try:
+            self._endpoint.close()
+            self._closed = True
+        except BaseException as error:
+            self._close_error = error
+            if handle is not None:
+                handle._retain_resource_failure(self, error)
+            raise
 
     def receive(self, *, timeout):
         if (
